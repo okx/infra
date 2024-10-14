@@ -77,7 +77,7 @@ func main() {
 	if os.Getenv(nacosExternalListenAddr) != "" {
 		externalListenAddr = os.Getenv(nacosExternalListenAddr)
 	}
-	log.Info("registering with nacos:", "nacos", config.Nacos)
+	log.Info("registering with nacos:", "nacos", config.Nacos, "externalListenAddr", externalListenAddr)
 	if len(config.Nacos.URLs) > 0 {
 		proxyd.StartNacosClient(
 			config.Nacos.URLs,
