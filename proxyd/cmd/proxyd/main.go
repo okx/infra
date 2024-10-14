@@ -78,14 +78,14 @@ func main() {
 		externalListenAddr = os.Getenv(nacosExternalListenAddr)
 	}
 	log.Info("registering with nacos:", "nacos", config.Nacos, "externalListenAddr", externalListenAddr)
-	if len(config.Nacos.URLs) > 0 {
-		proxyd.StartNacosClient(
-			config.Nacos.URLs,
-			config.Nacos.NamespaceId,
-			config.Nacos.ApplicationName,
-			externalListenAddr,
-		)
-	}
+	//	if len(config.Nacos.URLs) > 0 {
+	proxyd.StartNacosClient(
+		config.Nacos.URLs,
+		config.Nacos.NamespaceId,
+		config.Nacos.ApplicationName,
+		externalListenAddr,
+	)
+	//	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
