@@ -62,6 +62,13 @@ func main() {
 		}()
 	}
 
+	// non-blocking
+	_, shutdown, err := proxyd.Start(config)
+	if err != nil {
+		log.Crit("error starting proxyd", "err", err)
+	}
+
+	// Register after start.
 	if len(config.Nacos.URLs) > 0 {
 		proxyd.StartNacosClient(
 			config.Nacos.URLs,
@@ -69,11 +76,6 @@ func main() {
 			config.Nacos.ApplicationName,
 			config.Nacos.ExternalListenAddr,
 		)
-	}
-
-	_, shutdown, err := proxyd.Start(config)
-	if err != nil {
-		log.Crit("error starting proxyd", "err", err)
 	}
 
 	sig := make(chan os.Signal, 1)
