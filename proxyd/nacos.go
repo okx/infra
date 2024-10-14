@@ -51,7 +51,7 @@ func StartNacosClient(urls string, namespace string, name string, externalAddr s
 
 	_, err = client.RegisterInstance(vo.RegisterInstanceParam{
 		Ip:          ip,
-		Port:        uint64(port),
+		Port:        port,
 		ServiceName: name,
 		Weight:      defaultWeight,
 		ClusterName: "DEFAULT",
@@ -71,13 +71,14 @@ func StartNacosClient(urls string, namespace string, name string, externalAddr s
 }
 
 // ResolveIPAndPort resolve ip and port from addr
-func ResolveIPAndPort(addr string) (string, int, error) {
+func ResolveIPAndPort(addr string) (string, uint64, error) {
 	laddr := strings.Split(addr, ":")
 	ip := laddr[0]
 	if ip == "127.0.0.1" {
 		return GetLocalIP(), defaultPort, nil
 	}
-	port, err := strconv.Atoi(laddr[1])
+
+	port, err := strconv.ParseUint(laddr[1], 10, 64)
 	if err != nil {
 		return "", 0, err
 	}
@@ -104,15 +105,13 @@ func getServerConfigs(urls string) ([]constant.ServerConfig, error) {
 	// nolint
 	var configs []constant.ServerConfig
 	for _, url := range strings.Split(urls, ",") {
-		laddr := strings.Split(url, ":")
-		serverPort, err := strconv.Atoi(laddr[1])
+		laddr, serverPort, err := ResolveIPAndPort(url)
 		if err != nil {
-			log.Error("ERR PARSE HOST")
-			return nil, err
+			return nil, fmt.Errorf("Err parsing host: %+w", err)
 		}
 		configs = append(configs, constant.ServerConfig{
-			IpAddr: laddr[0],
-			Port:   uint64(serverPort),
+			IpAddr: laddr,
+			Port:   serverPort,
 		})
 	}
 	return configs, nil
