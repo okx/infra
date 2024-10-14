@@ -80,7 +80,8 @@ func main() {
 	log.Info("registering with nacos:", "nacos", config.Nacos, "externalListenAddr", externalListenAddr)
 	//	if len(config.Nacos.URLs) > 0 {
 	log.Info("registering with nacos+++++++++:", "nacos", config.Nacos, "externalListenAddr", externalListenAddr)
-	proxyd.StartNacosClient(
+	log.Info("registering with nacos+=+==++++:", "nacos", config.Nacos, "externalListenAddr", externalListenAddr)
+	startNacosClient(
 		config.Nacos.URLs,
 		config.Nacos.NamespaceId,
 		config.Nacos.ApplicationName,
