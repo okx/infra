@@ -24,16 +24,20 @@ const (
 func startNacosClient(urls string, namespace string, name string, externalAddr string) {
 	log.Info("start nacos client", "urls", urls, "namespace", namespace, "name", name, "externalAddr", externalAddr)
 	ip, port, err := ResolveIPAndPort(externalAddr)
+	log.Info("ip", ip, "port", port)
 	if err != nil {
 		log.Error(fmt.Sprintf("failed to resolve %s error: %s", externalAddr, err.Error()))
 		return
 	}
 
+	log.Info("1111111111111")
 	serverConfigs, err := getServerConfigs(urls)
+	log.Info("151515")
 	if err != nil {
 		log.Error(fmt.Sprintf("failed to resolve nacos server url %s: %s", urls, err.Error()))
 		return
 	}
+	log.Info("2222222222")
 	client, err := clients.CreateNamingClient(map[string]interface{}{
 		"serverConfigs": serverConfigs,
 		"clientConfig": constant.ClientConfig{
@@ -45,11 +49,13 @@ func startNacosClient(urls string, namespace string, name string, externalAddr s
 			LogLevel:            "error",
 		},
 	})
+	log.Info("3333333333")
 	if err != nil {
 		log.Error(fmt.Sprintf("failed to create nacos client. error: %s", err.Error()))
 		return
 	}
 
+	log.Info("444444444")
 	_, err = client.RegisterInstance(vo.RegisterInstanceParam{
 		Ip:          ip,
 		Port:        port,
@@ -64,6 +70,7 @@ func startNacosClient(urls string, namespace string, name string, externalAddr s
 			"app_registry_tag":          strconv.FormatInt(time.Now().Unix(), 10),
 		},
 	})
+	log.Info("55555555")
 	if err != nil {
 		log.Error(fmt.Sprintf("failed to register instance in nacos server. error: %s", err.Error()))
 		return
