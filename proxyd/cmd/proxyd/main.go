@@ -73,6 +73,7 @@ func main() {
 	}
 
 	// Register after start.
+	log.Info("registering with nacos:", "nacos", config.Nacos)
 	externalListenAddr := config.Nacos.ExternalListenAddr
 	if os.Getenv(nacosExternalListenAddr) != "" {
 		externalListenAddr = os.Getenv(nacosExternalListenAddr)
