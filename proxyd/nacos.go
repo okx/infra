@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ledgerwatch/log/v3"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/nacos-group/nacos-sdk-go/clients"
 	"github.com/nacos-group/nacos-sdk-go/common/constant"
 	"github.com/nacos-group/nacos-sdk-go/vo"
