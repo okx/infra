@@ -22,6 +22,7 @@ const (
 
 // StartNacosClient start nacos client and register rest service in nacos
 func StartNacosClient(urls string, namespace string, name string, externalAddr string) {
+	log.Info("start nacos client", "urls", urls, "namespace", namespace, "name", name, "externalAddr", externalAddr)
 	ip, port, err := ResolveIPAndPort(externalAddr)
 	if err != nil {
 		log.Error(fmt.Sprintf("failed to resolve %s error: %s", externalAddr, err.Error()))

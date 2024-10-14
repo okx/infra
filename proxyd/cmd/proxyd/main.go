@@ -79,7 +79,6 @@ func main() {
 	}
 	log.Info("registering with nacos:", "nacos", config.Nacos)
 	if len(config.Nacos.URLs) > 0 {
-		log.Info("registering with nacos:", "nacos", config.Nacos)
 		proxyd.StartNacosClient(
 			config.Nacos.URLs,
 			config.Nacos.NamespaceId,
