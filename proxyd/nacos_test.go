@@ -46,6 +46,11 @@ func TestManyResolveIPAndPort(t *testing.T) {
 			[]string{"127.0.0.3", "127.0.0.2"},
 			[]uint64{7001, 7002},
 		},
+		{
+			"127.0.0.2:7001,127.0.0.2:7002",
+			[]string{"127.0.0.2", "127.0.0.2"},
+			[]uint64{7001, 7002},
+		},
 	}
 
 	for _, tc := range testcases {
