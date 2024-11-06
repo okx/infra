@@ -37,16 +37,25 @@ func TestManyResolveIPAndPort(t *testing.T) {
 		expectedPorts []uint64
 	}{
 		{
+			// Single declaration should not fail.
+			"127.0.0.1:7001",
+			[]string{GetLocalIP()},
+			[]uint64{defaultPort},
+		},
+		{
+			// Defaults to local IP.
 			"127.0.0.1:7001,127.0.0.1:7002",
 			[]string{GetLocalIP(), GetLocalIP()},
 			[]uint64{defaultPort, defaultPort},
 		},
+		// {
+		// 	// This should panic on start (to warn about misconfiguration)
+		// 	"127.0.0.3:7001,127.0.0.2:7002",
+		// 	[]string{},
+		// 	[]uint64{7001},
+		// },
 		{
-			"127.0.0.3:7001,127.0.0.2:7002",
-			[]string{"127.0.0.3", "127.0.0.2"},
-			[]uint64{7001, 7002},
-		},
-		{
+			// Same IPs, different ports.
 			"127.0.0.2:7001,127.0.0.2:7002",
 			[]string{"127.0.0.2", "127.0.0.2"},
 			[]uint64{7001, 7002},

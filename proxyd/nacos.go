@@ -49,11 +49,26 @@ func StartNacosClient(urls string, namespace string, name string, externalAddr s
 
 	appNames := strings.Split(name, ",")
 	addrs := strings.Split(externalAddr, ",")
+
+	if len(appNames) != len(addrs) {
+		panic(fmt.Sprintf("Nacos: number of app names not equal to number of external addresses."))
+	}
+
+	firstIP := ""
 	for i := 0; i < len(addrs); i++ {
 		ip, port, err := ResolveIPAndPort(addrs[i])
 		if err != nil {
 			log.Error(fmt.Sprintf("failed to resolve %s error: %s", externalAddr, err.Error()))
 			return
+		}
+
+		// Verify same IP address is used for multiple ports.
+		if firstIP == "" {
+			firstIP = ip
+		} else {
+			if firstIP != ip {
+				panic(fmt.Sprintf("This should not happen. firstIP: %s, ip: %s", firstIP, ip))
+			}
 		}
 
 		// Register on each ip,port instance.
