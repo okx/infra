@@ -21,11 +21,7 @@ const (
 )
 
 // StartNacosClient start nacos client and register rest service in nacos
-//
-// Each param except `namespace` are comma-separated strings unless there is only 1.
-// Eg. urls = "online-nacosapi.okg.com:80"
-// Eg. urls = "online-nacosapi.okg.com:80,test.okg.com:123"
-func StartNacosClient(urls string, namespace string, name string, externalAddr string) {
+func StartNacosClient(urls string, namespace string, name string, externalIP string, externalPorts string) {
 	serverConfigs, err := getServerConfigs(urls)
 	if err != nil {
 		log.Error(fmt.Sprintf("failed to resolve nacos server url %s: %s", urls, err.Error()))
@@ -48,32 +44,25 @@ func StartNacosClient(urls string, namespace string, name string, externalAddr s
 	}
 
 	appNames := strings.Split(name, ",")
-	addrs := strings.Split(externalAddr, ",")
-
-	if len(appNames) != len(addrs) {
+	ports := strings.Split(externalPorts, ",")
+	if len(appNames) != len(ports) {
 		panic(fmt.Sprintf("Nacos: number of app names not equal to number of external addresses."))
 	}
 
-	firstIP := ""
-	for i := 0; i < len(addrs); i++ {
-		ip, port, err := ResolveIPAndPort(addrs[i])
-		if err != nil {
-			log.Error(fmt.Sprintf("failed to resolve %s error: %s", externalAddr, err.Error()))
-			return
+	for i := 0; i < len(ports); i++ {
+		if externalIP == "127.0.0.1" {
+			externalIP = GetLocalIP()
 		}
 
-		// Verify same IP address is used for multiple ports.
-		if firstIP == "" {
-			firstIP = ip
-		} else {
-			if firstIP != ip {
-				panic(fmt.Sprintf("This should not happen. firstIP: %s, ip: %s", firstIP, ip))
-			}
+		port, err := strconv.ParseUint(ports[i], 10, 64)
+		if err != nil {
+			log.Error(fmt.Sprintf("failed to convert port %s error: %s", ports[i], err.Error()))
+			return
 		}
 
 		// Register on each ip,port instance.
 		_, err = client.RegisterInstance(vo.RegisterInstanceParam{
-			Ip:          ip,
+			Ip:          externalIP,
 			Port:        port,
 			ServiceName: appNames[i],
 			Weight:      defaultWeight,
