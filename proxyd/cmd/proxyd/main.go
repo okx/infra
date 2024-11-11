@@ -25,6 +25,10 @@ var (
 	GitDate    = ""
 )
 
+const (
+	podIpEnv = "MY_POD_IP"
+)
+
 func main() {
 	// Set up logger with a default INFO level in case we fail to parse flags.
 	// Otherwise the final critical log won't show what the parsing error was.
@@ -70,9 +74,9 @@ func main() {
 
 	// Register after start.
 	externalIP := config.Nacos.ExternalIP
-	podIpEnv := "MY_POD_IP"
 	if os.Getenv(podIpEnv) != "" {
 		externalIP = os.Getenv(podIpEnv)
+		log.Warn("External IP replaced by env `MY_POD_IP`", "ExternalIP", externalIP)
 	}
 
 	// Register after start.
