@@ -73,14 +73,13 @@ func main() {
 	}
 
 	// Register after start.
-	externalIP := config.Nacos.ExternalIP
-	if os.Getenv(podIpEnv) != "" {
-		externalIP = os.Getenv(podIpEnv)
-		log.Warn("External IP replaced by env `MY_POD_IP`", "ExternalIP", externalIP)
-	}
-
-	// Register after start.
 	if len(config.Nacos.URLs) > 0 {
+		externalIP := config.Nacos.ExternalIP
+		if os.Getenv(podIpEnv) != "" {
+			externalIP = os.Getenv(podIpEnv)
+			log.Warn("External IP replaced by env `MY_POD_IP`", "ExternalIP", externalIP)
+		}
+
 		proxyd.StartNacosClient(
 			config.Nacos.URLs,
 			config.Nacos.NamespaceId,
