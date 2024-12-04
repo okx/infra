@@ -464,11 +464,13 @@ func Start(config *Config) (*Server, func(), error) {
 				if bgcfg.ConsensusHAHeartbeatInterval > 0 {
 					topts = append(topts, WithHeartbeatInterval(time.Duration(bgcfg.ConsensusHAHeartbeatInterval)))
 				}
-				consensusHARedisClient, err := NewRedisClient(bgcfg.ConsensusHARedis.URL)
+				// consensusHARedisClient, err := NewRedisClient(bgcfg.ConsensusHARedis.URL)
+				consensusHARedisClient, err := NewRedisClusterClient(bgcfg.ConsensusHARedis.URL)
 				if err != nil {
 					return nil, nil, err
 				}
-				if err := CheckRedisConnection(consensusHARedisClient); err != nil {
+				// if err := CheckRedisConnection(consensusHARedisClient); err != nil {
+				if err := CheckRedisClusterConnection(consensusHARedisClient); err != nil {
 					return nil, nil, err
 				}
 				ns := fmt.Sprintf("%s:%s", bgcfg.ConsensusHARedis.Namespace, bg.Name)
