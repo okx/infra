@@ -41,6 +41,7 @@ type RedisConfig struct {
 	Namespace        string `toml:"namespace"`
 	ReadURL          string `toml:"read_url"`
 	FallbackToMemory bool   `toml:"fallback_to_memory"`
+	EnableCluster    bool   `toml:"enable_cluster"` // connect using Redis cluster client
 }
 
 type MetricsConfig struct {
