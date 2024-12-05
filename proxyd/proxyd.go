@@ -70,7 +70,7 @@ func Start(config *Config) (*Server, func(), error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		redisClient, err = NewRedisClient(rURL, config.Redis.Choice)
+		redisReadClient, err = NewRedisClient(rURL, config.Redis.Choice)
 		if err != nil {
 			return nil, nil, err
 		}
