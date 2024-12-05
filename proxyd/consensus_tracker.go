@@ -112,7 +112,7 @@ func (ct *InMemoryConsensusTracker) SetFinalizedBlockNumber(blockNumber hexutil.
 // RedisConsensusTracker store and retrieve in a shared Redis cluster, with leader election
 type RedisConsensusTracker struct {
 	ctx          context.Context
-	client       *redis.ClusterClient
+	client       redis.UniversalClient
 	namespace    string
 	backendGroup *BackendGroup
 
@@ -144,8 +144,9 @@ func WithHeartbeatInterval(heartbeatInterval time.Duration) RedisConsensusTracke
 		ct.heartbeatInterval = heartbeatInterval
 	}
 }
+
 func NewRedisConsensusTracker(ctx context.Context,
-	redisClient *redis.ClusterClient,
+	redisClient redis.UniversalClient,
 	bg *BackendGroup,
 	namespace string,
 	opts ...RedisConsensusTrackerOpt) ConsensusTracker {
@@ -193,7 +194,7 @@ func (ct *RedisConsensusTracker) stateHeartbeat() {
 
 	val, err := ct.client.Get(ct.ctx, key).Result()
 	if err != nil && err != redis.Nil {
-		log.Error("failed to read the lock", "err", err) // What is the key?
+		log.Error("failed to read the lock", "err", err)
 		RecordGroupConsensusError(ct.backendGroup, "read_lock", err)
 		if ct.leader {
 			ok, err := ct.redlock.Unlock()

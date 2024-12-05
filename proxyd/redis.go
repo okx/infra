@@ -25,17 +25,7 @@ func NewRedisClusterClient(url string) (*redis.ClusterClient, error) {
 	return client, nil
 }
 
-func CheckRedisConnection(client *redis.Client) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := client.Ping(ctx).Err(); err != nil {
-		return wrapErr(err, "error connecting to redis")
-	}
-
-	return nil
-}
-
-func CheckRedisClusterConnection(client *redis.ClusterClient) error {
+func CheckRedisConnection(client redis.UniversalClient) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := client.Ping(ctx).Err(); err != nil {
