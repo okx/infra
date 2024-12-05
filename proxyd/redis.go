@@ -17,6 +17,8 @@ func NewRedisClient(url string, choice RedisClientChoice) (redis.UniversalClient
 			return nil, err
 		}
 		return redis.NewClusterClient(opts), nil
+	case DefaultChoice:
+		fallthrough
 	default:
 		log.Info("Using default redis client.", "choice", choice)
 		opts, err := redis.ParseURL(url)
