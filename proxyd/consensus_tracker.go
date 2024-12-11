@@ -254,7 +254,7 @@ func (ct *RedisConsensusTracker) stateHeartbeat() {
 				return
 			}
 
-			ct.remote.update(state) // redis -> remote
+			ct.remote.update(state)
 			log.Info("updated state from remote", "state", val, "leader", leaderName)
 
 			RecordGroupConsensusHALatestBlock(ct.backendGroup, leaderName, ct.remote.state.Latest)
