@@ -112,7 +112,7 @@ func (ct *InMemoryConsensusTracker) SetFinalizedBlockNumber(blockNumber hexutil.
 // RedisConsensusTracker store and retrieve in a shared Redis cluster, with leader election
 type RedisConsensusTracker struct {
 	ctx          context.Context
-	client       *redis.Client
+	client       redis.UniversalClient
 	namespace    string
 	backendGroup *BackendGroup
 
@@ -144,8 +144,9 @@ func WithHeartbeatInterval(heartbeatInterval time.Duration) RedisConsensusTracke
 		ct.heartbeatInterval = heartbeatInterval
 	}
 }
+
 func NewRedisConsensusTracker(ctx context.Context,
-	redisClient *redis.Client,
+	redisClient redis.UniversalClient,
 	bg *BackendGroup,
 	namespace string,
 	opts ...RedisConsensusTrackerOpt) ConsensusTracker {
@@ -254,7 +255,7 @@ func (ct *RedisConsensusTracker) stateHeartbeat() {
 			}
 
 			ct.remote.update(state)
-			log.Debug("updated state from remote", "state", val, "leader", leaderName)
+			log.Info("updated state from remote", "state", val, "leader", leaderName)
 
 			RecordGroupConsensusHALatestBlock(ct.backendGroup, leaderName, ct.remote.state.Latest)
 			RecordGroupConsensusHASafeBlock(ct.backendGroup, leaderName, ct.remote.state.Safe)
@@ -328,6 +329,7 @@ func (ct *RedisConsensusTracker) postPayload(mutexVal string) {
 		ct.leader = false
 		return
 	}
+
 	err = ct.client.Set(ct.ctx, ct.key(fmt.Sprintf("state:%s", mutexVal)), jsonState, ct.lockPeriod).Err()
 	if err != nil {
 		log.Error("failed to post the state", "err", err)
@@ -345,7 +347,7 @@ func (ct *RedisConsensusTracker) postPayload(mutexVal string) {
 		return
 	}
 
-	log.Debug("posted state", "state", string(jsonState), "leader", leader)
+	log.Info("posted state", "state", string(jsonState), "leader", leader)
 
 	ct.leaderName = leader
 	ct.remote.update(ct.local.state)

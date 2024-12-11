@@ -186,7 +186,7 @@ func (ah *PollerAsyncHandler) Init() {
 	go func() {
 		for {
 			timer := time.NewTimer(ah.cp.interval)
-			log.Info("updating backend group consensus")
+			// log.Info("updating backend group consensus")
 			ah.cp.UpdateBackendGroupConsensus(ah.ctx)
 
 			select {
@@ -526,6 +526,11 @@ func (cp *ConsensusPoller) UpdateBackendGroupConsensus(ctx context.Context) {
 	cp.tracker.SetLatestBlockNumber(proposedBlock)
 	cp.tracker.SetSafeBlockNumber(lowestSafeBlock)
 	cp.tracker.SetFinalizedBlockNumber(lowestFinalizedBlock)
+	log.Info("poller: set remote state from backend group",
+		"latest", proposedBlock,
+		"safe", lowestSafeBlock,
+		"finalized", lowestFinalizedBlock,
+	)
 
 	// update consensus group
 	group := make([]*Backend, 0, len(candidates))
