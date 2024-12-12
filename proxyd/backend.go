@@ -798,7 +798,7 @@ func (bg *BackendGroup) Forward(ctx context.Context, rpcReqs []*RPCReq, isBatch 
 				if err == nil {
 					var m = make([]string, 2)
 					err = json.Unmarshal(paramBytes, &m)
-					if len(m) >= 2 {
+					if len(m) >= 1 && len(m[0]) >= 2 {
 						n, err := strconv.ParseInt(m[0][2:], 16, 64)
 						log.Info("Before forward request",
 							"method", r.Method,
