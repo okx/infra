@@ -791,7 +791,7 @@ func (bg *BackendGroup) Forward(ctx context.Context, rpcReqs []*RPCReq, isBatch 
 
 	ch := make(chan BackendGroupRPCResponse)
 	go func() {
-		defer close(ch)
+		// My logging
 		if len(rpcReqs) > 0 {
 			for _, r := range rpcReqs {
 				paramBytes, err := r.Params.MarshalJSON()
@@ -809,6 +809,8 @@ func (bg *BackendGroup) Forward(ctx context.Context, rpcReqs []*RPCReq, isBatch 
 				}
 			}
 		}
+
+		defer close(ch)
 		backendResp := bg.ForwardRequestToBackendGroup(rpcReqs, backends, ctx, isBatch)
 		ch <- *backendResp
 	}()
@@ -829,22 +831,10 @@ func (bg *BackendGroup) Forward(ctx context.Context, rpcReqs []*RPCReq, isBatch 
 		"auth", GetAuthCtx(ctx),
 	)
 	res := OverrideResponses(backendResp.RPCRes, overriddenResponses)
-	if len(res) > 0 {
-		for _, rs := range res {
-			m, ok := rs.Result.(map[string]interface{})
-			if ok {
-				n, err := strconv.ParseInt(m["number"].(string)[2:], 16, 64)
-				if err == nil {
-					err = backendResp.error
-				}
-				log.Info("After forward",
-					"number", n,
-					"servedBy", backendResp.ServedBy,
-					"err", backendResp.error,
-				)
-			}
-		}
-	}
+	log.Info("After forward",
+		"servedBy", backendResp.ServedBy,
+		"err", backendResp.error,
+	)
 	return res, backendResp.ServedBy, backendResp.error
 }
 
