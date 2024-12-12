@@ -792,6 +792,11 @@ func (bg *BackendGroup) Forward(ctx context.Context, rpcReqs []*RPCReq, isBatch 
 	ch := make(chan BackendGroupRPCResponse)
 	go func() {
 		defer close(ch)
+		if len(rpcReqs) > 0 {
+			for _, r := range rpcReqs {
+				log.Info("Before forward request", "method", r.Method, "params", r.Params)
+			}
+		}
 		backendResp := bg.ForwardRequestToBackendGroup(rpcReqs, backends, ctx, isBatch)
 		ch <- *backendResp
 	}()
@@ -812,6 +817,18 @@ func (bg *BackendGroup) Forward(ctx context.Context, rpcReqs []*RPCReq, isBatch 
 		"auth", GetAuthCtx(ctx),
 	)
 	res := OverrideResponses(backendResp.RPCRes, overriddenResponses)
+	if len(res) > 0 {
+		for _, rs := range res {
+			m, ok := rs.Result.(map[string]interface{})
+			if ok {
+				log.Info("After forward",
+					"number", m["number"],
+					"servedBy", backendResp.ServedBy,
+					"err", backendResp.error,
+				)
+			}
+		}
+	}
 	return res, backendResp.ServedBy, backendResp.error
 }
 
@@ -1488,6 +1505,12 @@ func (bg *BackendGroup) OverwriteConsensusResponses(rpcReqs []*RPCReq, overridde
 		finalized:     bg.Consensus.GetFinalizedBlockNumber(),
 		maxBlockRange: bg.Consensus.maxBlockRange,
 	}
+
+	log.Info("rctx before rewriting tags.",
+		"latest", rctx.latest,
+		"safe", rctx.safe,
+		"finalized", rctx.finalized,
+	)
 
 	for i, req := range rpcReqs {
 		res := RPCRes{JSONRPC: JSONRPCVersion, ID: req.ID}
