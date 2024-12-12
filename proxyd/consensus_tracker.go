@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -255,7 +256,8 @@ func (ct *RedisConsensusTracker) stateHeartbeat() {
 			}
 
 			ct.remote.update(state)
-			log.Info("updated state from remote", "state", val, "leader", leaderName)
+
+			logTrackerState("updated state from remote", []byte(val), leaderName)
 
 			RecordGroupConsensusHALatestBlock(ct.backendGroup, leaderName, ct.remote.state.Latest)
 			RecordGroupConsensusHASafeBlock(ct.backendGroup, leaderName, ct.remote.state.Safe)
@@ -347,7 +349,7 @@ func (ct *RedisConsensusTracker) postPayload(mutexVal string) {
 		return
 	}
 
-	log.Info("posted state", "state", string(jsonState), "leader", leader)
+	logTrackerState("posted state", jsonState, leader)
 
 	ct.leaderName = leader
 	ct.remote.update(ct.local.state)
@@ -355,4 +357,22 @@ func (ct *RedisConsensusTracker) postPayload(mutexVal string) {
 	RecordGroupConsensusHALatestBlock(ct.backendGroup, leader, ct.remote.state.Latest)
 	RecordGroupConsensusHASafeBlock(ct.backendGroup, leader, ct.remote.state.Safe)
 	RecordGroupConsensusHAFinalizedBlock(ct.backendGroup, leader, ct.remote.state.Finalized)
+}
+
+func logTrackerState(msg string, jsonState []byte, leaderName string) {
+	var m = make(map[string]interface{})
+	err := json.Unmarshal(jsonState, &m)
+	if err == nil {
+		latest, _ := strconv.ParseInt(m["latest"].(string)[2:], 16, 64)
+		safe, _ := strconv.ParseInt(m["safe"].(string)[2:], 16, 64)
+		finalized, _ := strconv.ParseInt(m["finalized"].(string)[2:], 16, 64)
+		log.Info(msg,
+			"latests", latest,
+			"safe", safe,
+			"finalized", finalized,
+			"leader", leaderName,
+		)
+	} else {
+		log.Warn("Error unpacking tracker state into map.", "error", err)
+	}
 }

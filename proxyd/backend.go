@@ -794,7 +794,19 @@ func (bg *BackendGroup) Forward(ctx context.Context, rpcReqs []*RPCReq, isBatch 
 		defer close(ch)
 		if len(rpcReqs) > 0 {
 			for _, r := range rpcReqs {
-				log.Info("Before forward request", "method", r.Method, "params", r.Params)
+				paramBytes, err := r.Params.MarshalJSON()
+				if err == nil {
+					var m = make([]string, 2)
+					err = json.Unmarshal(paramBytes, &m)
+					if len(m) >= 2 {
+						n, err := strconv.ParseInt(m[0][2:], 16, 64)
+						log.Info("Before forward request",
+							"method", r.Method,
+							"number", n,
+							"error", err,
+						)
+					}
+				}
 			}
 		}
 		backendResp := bg.ForwardRequestToBackendGroup(rpcReqs, backends, ctx, isBatch)
@@ -821,8 +833,12 @@ func (bg *BackendGroup) Forward(ctx context.Context, rpcReqs []*RPCReq, isBatch 
 		for _, rs := range res {
 			m, ok := rs.Result.(map[string]interface{})
 			if ok {
+				n, err := strconv.ParseInt(m["number"].(string)[2:], 16, 64)
+				if err == nil {
+					err = backendResp.error
+				}
 				log.Info("After forward",
-					"number", m["number"],
+					"number", n,
 					"servedBy", backendResp.ServedBy,
 					"err", backendResp.error,
 				)
@@ -1507,9 +1523,9 @@ func (bg *BackendGroup) OverwriteConsensusResponses(rpcReqs []*RPCReq, overridde
 	}
 
 	log.Info("rctx before rewriting tags.",
-		"latest", rctx.latest,
-		"safe", rctx.safe,
-		"finalized", rctx.finalized,
+		"latest", int(rctx.latest),
+		"safe", int(rctx.safe),
+		"finalized", int(rctx.finalized),
 	)
 
 	for i, req := range rpcReqs {

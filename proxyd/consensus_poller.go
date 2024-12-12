@@ -526,10 +526,11 @@ func (cp *ConsensusPoller) UpdateBackendGroupConsensus(ctx context.Context) {
 	cp.tracker.SetLatestBlockNumber(proposedBlock)
 	cp.tracker.SetSafeBlockNumber(lowestSafeBlock)
 	cp.tracker.SetFinalizedBlockNumber(lowestFinalizedBlock)
+
 	log.Info("poller: set remote state from backend group",
-		"latest", proposedBlock,
-		"safe", lowestSafeBlock,
-		"finalized", lowestFinalizedBlock,
+		"latest", int(proposedBlock),
+		"safe", int(lowestSafeBlock),
+		"finalized", int(lowestFinalizedBlock),
 	)
 
 	// update consensus group
