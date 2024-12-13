@@ -186,7 +186,7 @@ func (ah *PollerAsyncHandler) Init() {
 	go func() {
 		for {
 			timer := time.NewTimer(ah.cp.interval)
-			log.Info("updating backend group consensus")
+			log.Debug("updating backend group consensus")
 			ah.cp.UpdateBackendGroupConsensus(ah.ctx)
 
 			select {
@@ -526,6 +526,26 @@ func (cp *ConsensusPoller) UpdateBackendGroupConsensus(ctx context.Context) {
 	cp.tracker.SetLatestBlockNumber(proposedBlock)
 	cp.tracker.SetSafeBlockNumber(lowestSafeBlock)
 	cp.tracker.SetFinalizedBlockNumber(lowestFinalizedBlock)
+
+	tr, ok := cp.tracker.(*RedisConsensusTracker)
+	if ok {
+		leader, leaderName := tr.GetLeader()
+		if leader {
+			log.Info("leader poller: set remote state",
+				"latest", proposedBlock,
+				"safe", lowestSafeBlock,
+				"finalized", lowestFinalizedBlock,
+				"leaderName", leaderName,
+			)
+		} else {
+			log.Info("follower poller: set remote state",
+				"latest", proposedBlock,
+				"safe", lowestSafeBlock,
+				"finalized", lowestFinalizedBlock,
+				"leaderName", leaderName,
+			)
+		}
+	}
 
 	// update consensus group
 	group := make([]*Backend, 0, len(candidates))

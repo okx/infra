@@ -254,7 +254,7 @@ func (ct *RedisConsensusTracker) stateHeartbeat() {
 			}
 
 			ct.remote.update(state)
-			log.Debug("updated state from remote", "state", val, "leader", leaderName)
+			log.Info("updated state from remote", "state", val, "leader", leaderName)
 
 			RecordGroupConsensusHALatestBlock(ct.backendGroup, leaderName, ct.remote.state.Latest)
 			RecordGroupConsensusHASafeBlock(ct.backendGroup, leaderName, ct.remote.state.Safe)
@@ -294,6 +294,10 @@ func (ct *RedisConsensusTracker) stateHeartbeat() {
 
 func (ct *RedisConsensusTracker) key(tag string) string {
 	return fmt.Sprintf("consensus:%s:%s", ct.namespace, tag)
+}
+
+func (ct *RedisConsensusTracker) GetLeader() (bool, string) {
+	return ct.leader, ct.leaderName
 }
 
 func (ct *RedisConsensusTracker) GetLatestBlockNumber() hexutil.Uint64 {
@@ -345,7 +349,7 @@ func (ct *RedisConsensusTracker) postPayload(mutexVal string) {
 		return
 	}
 
-	log.Debug("posted state", "state", string(jsonState), "leader", leader)
+	log.Info("posted state", "state", string(jsonState), "leader", leader)
 
 	ct.leaderName = leader
 	ct.remote.update(ct.local.state)
