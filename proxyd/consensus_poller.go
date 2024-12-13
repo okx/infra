@@ -803,11 +803,26 @@ func (cp *ConsensusPoller) FilterCandidates(backends []*Backend) map[*Backend]*b
 	// find the highest common ancestor block
 	lagging := make([]*Backend, 0, len(candidates))
 	for be, bs := range candidates {
+		log.Info("candidate block numbers",
+			"highest", highestLatestBlock,
+			"backend", bs.latestBlockNumber,
+			"name", be.Name,
+		)
 		// check if backend is lagging behind the highest block
 		if uint64(highestLatestBlock-bs.latestBlockNumber) > cp.maxBlockLag {
 			lagging = append(lagging, be)
 		}
 	}
+
+	// Log whether lagging backends got filtered out.
+	var laggers string
+	for i, lag := range lagging {
+		if i > 0 {
+			laggers += ","
+		}
+		laggers += lag.Name
+	}
+	log.Warn("lagging backends", "backends", laggers)
 
 	// remove lagging backends from the candidates
 	for _, be := range lagging {
