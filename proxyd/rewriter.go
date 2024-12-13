@@ -275,6 +275,10 @@ func rewriteTag(rctx RewriteContext, current string) (string, bool, error) {
 		return rctx.latest.String(), true, nil
 	default:
 		if bnh.BlockNumber.Int64() > int64(rctx.latest) {
+			log.Warn("Block is out of range",
+				"requested", bnh.BlockNumber.Int64(),
+				"remote", rctx.latest,
+			)
 			return "", false, ErrRewriteBlockOutOfRange
 		}
 	}
@@ -303,10 +307,6 @@ func rewriteTagBlockNumberOrHash(rctx RewriteContext, current *rpc.BlockNumberOr
 		return &bn, true, nil
 	default:
 		if current.BlockNumber.Int64() > int64(rctx.latest) {
-			log.Warn("Block is out of range",
-				"requested", current.BlockNumber.Int64(),
-				"remote", rctx.latest,
-			)
 			return nil, false, ErrRewriteBlockOutOfRange
 		}
 	}
