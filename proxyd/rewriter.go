@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
@@ -302,6 +303,10 @@ func rewriteTagBlockNumberOrHash(rctx RewriteContext, current *rpc.BlockNumberOr
 		return &bn, true, nil
 	default:
 		if current.BlockNumber.Int64() > int64(rctx.latest) {
+			log.Warn("Block is out of range",
+				"requested", current.BlockNumber.Int64(),
+				"remote", rctx.latest,
+			)
 			return nil, false, ErrRewriteBlockOutOfRange
 		}
 	}
