@@ -186,7 +186,7 @@ func (ah *PollerAsyncHandler) Init() {
 	go func() {
 		for {
 			timer := time.NewTimer(ah.cp.interval)
-			log.Info("updating backend group consensus")
+			log.Debug("updating backend group consensus")
 			ah.cp.UpdateBackendGroupConsensus(ah.ctx)
 
 			select {
@@ -387,6 +387,11 @@ func (cp *ConsensusPoller) UpdateBackend(ctx context.Context, be *Backend) {
 	RecordBackendFinalizedBlock(be, finalizedBlockNumber)
 
 	if changed {
+		log.Info("Fetch block and set",
+			"latest", latestBlockNumber,
+			"safeBlockNumber", safeBlockNumber,
+			"finalizedBlockNumber", finalizedBlockNumber,
+		)
 		log.Debug("backend state updated",
 			"name", be.Name,
 			"peerCount", peerCount,
@@ -526,6 +531,26 @@ func (cp *ConsensusPoller) UpdateBackendGroupConsensus(ctx context.Context) {
 	cp.tracker.SetLatestBlockNumber(proposedBlock)
 	cp.tracker.SetSafeBlockNumber(lowestSafeBlock)
 	cp.tracker.SetFinalizedBlockNumber(lowestFinalizedBlock)
+
+	tr, ok := cp.tracker.(*RedisConsensusTracker)
+	if ok {
+		leader, leaderName := tr.GetLeader()
+		if leader {
+			log.Info("leader poller: set remote state",
+				"latest", proposedBlock,
+				"safe", lowestSafeBlock,
+				"finalized", lowestFinalizedBlock,
+				"leaderName", leaderName,
+			)
+		} else {
+			log.Info("follower poller: set remote state",
+				"latest", proposedBlock,
+				"safe", lowestSafeBlock,
+				"finalized", lowestFinalizedBlock,
+				"leaderName", leaderName,
+			)
+		}
+	}
 
 	// update consensus group
 	group := make([]*Backend, 0, len(candidates))
@@ -783,10 +808,29 @@ func (cp *ConsensusPoller) FilterCandidates(backends []*Backend) map[*Backend]*b
 	// find the highest common ancestor block
 	lagging := make([]*Backend, 0, len(candidates))
 	for be, bs := range candidates {
+		if highestLatestBlock != bs.latestBlockNumber {
+			log.Info("candidate block numbers",
+				"highest", highestLatestBlock,
+				"backend", bs.latestBlockNumber,
+				"name", be.Name,
+			)
+		}
 		// check if backend is lagging behind the highest block
 		if uint64(highestLatestBlock-bs.latestBlockNumber) > cp.maxBlockLag {
 			lagging = append(lagging, be)
 		}
+	}
+
+	// Log whether lagging backends got filtered out.
+	var laggers string
+	for i, lag := range lagging {
+		if i > 0 {
+			laggers += ","
+		}
+		laggers += lag.Name
+	}
+	if laggers != "" {
+		log.Warn("lagging backends", "backends", laggers)
 	}
 
 	// remove lagging backends from the candidates

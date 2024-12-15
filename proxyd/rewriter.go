@@ -3,8 +3,10 @@ package proxyd
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
@@ -274,6 +276,10 @@ func rewriteTag(rctx RewriteContext, current string) (string, bool, error) {
 		return rctx.latest.String(), true, nil
 	default:
 		if bnh.BlockNumber.Int64() > int64(rctx.latest) {
+			log.Warn("Block is out of range",
+				"requested", fmt.Sprintf("0x%x", bnh.BlockNumber.Int64()),
+				"remote", rctx.latest,
+			)
 			return "", false, ErrRewriteBlockOutOfRange
 		}
 	}

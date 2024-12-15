@@ -112,7 +112,7 @@ func (ct *InMemoryConsensusTracker) SetFinalizedBlockNumber(blockNumber hexutil.
 // RedisConsensusTracker store and retrieve in a shared Redis cluster, with leader election
 type RedisConsensusTracker struct {
 	ctx          context.Context
-	client       *redis.Client
+	client       redis.UniversalClient
 	namespace    string
 	backendGroup *BackendGroup
 
@@ -129,6 +129,12 @@ type RedisConsensusTracker struct {
 	// holds a copy of the remote shared state
 	// when leader, updates the remote with the local state
 	remote *InMemoryConsensusTracker
+
+	// Time read/write operations for experimental purposes.
+	timerWriteRedisCount uint
+	timerReadRedisCount  uint
+	timerReadMemCount    uint
+	pulse                uint
 }
 
 type RedisConsensusTrackerOpt func(cp *RedisConsensusTracker)
@@ -145,7 +151,7 @@ func WithHeartbeatInterval(heartbeatInterval time.Duration) RedisConsensusTracke
 	}
 }
 func NewRedisConsensusTracker(ctx context.Context,
-	redisClient *redis.Client,
+	redisClient redis.UniversalClient,
 	bg *BackendGroup,
 	namespace string,
 	opts ...RedisConsensusTrackerOpt) ConsensusTracker {
@@ -160,6 +166,8 @@ func NewRedisConsensusTracker(ctx context.Context,
 		heartbeatInterval: 2 * time.Second,
 		local:             NewInMemoryConsensusTracker().(*InMemoryConsensusTracker),
 		remote:            NewInMemoryConsensusTracker().(*InMemoryConsensusTracker),
+
+		pulse: 50,
 	}
 
 	for _, opt := range opts {
@@ -234,7 +242,12 @@ func (ct *RedisConsensusTracker) stateHeartbeat() {
 			ct.leaderName = leaderName
 			log.Debug("following", "val", val, "leader", leaderName)
 			// retrieve payload
+			var start = time.Now()
+			ct.timerReadRedisCount += 1 % ct.pulse
 			val, err := ct.client.Get(ct.ctx, ct.key(fmt.Sprintf("state:%s", val))).Result()
+			if ct.timerReadRedisCount%ct.pulse == 0 {
+				log.Info("Follower read from cache", "time taken", time.Now().Sub(start), "hasErr", err != nil)
+			}
 			if err != nil && err != redis.Nil {
 				log.Error("failed to read the remote state", "err", err)
 				RecordGroupConsensusError(ct.backendGroup, "read_state", err)
@@ -254,7 +267,7 @@ func (ct *RedisConsensusTracker) stateHeartbeat() {
 			}
 
 			ct.remote.update(state)
-			log.Debug("updated state from remote", "state", val, "leader", leaderName)
+			log.Info("updated state from remote", "state", val, "leader", leaderName)
 
 			RecordGroupConsensusHALatestBlock(ct.backendGroup, leaderName, ct.remote.state.Latest)
 			RecordGroupConsensusHASafeBlock(ct.backendGroup, leaderName, ct.remote.state.Safe)
@@ -296,7 +309,18 @@ func (ct *RedisConsensusTracker) key(tag string) string {
 	return fmt.Sprintf("consensus:%s:%s", ct.namespace, tag)
 }
 
+func (ct *RedisConsensusTracker) GetLeader() (bool, string) {
+	return ct.leader, ct.leaderName
+}
+
 func (ct *RedisConsensusTracker) GetLatestBlockNumber() hexutil.Uint64 {
+	var start = time.Now()
+	ct.timerReadMemCount += 1 % ct.pulse
+	defer func() {
+		if ct.timerReadMemCount%ct.pulse == 0 {
+			log.Info("Reading remote latest", "time taken", time.Now().Sub(start))
+		}
+	}()
 	return ct.remote.GetLatestBlockNumber()
 }
 
@@ -328,7 +352,13 @@ func (ct *RedisConsensusTracker) postPayload(mutexVal string) {
 		ct.leader = false
 		return
 	}
+
+	var start = time.Now()
+	ct.timerWriteRedisCount += 1 % ct.pulse
 	err = ct.client.Set(ct.ctx, ct.key(fmt.Sprintf("state:%s", mutexVal)), jsonState, ct.lockPeriod).Err()
+	if ct.timerWriteRedisCount%ct.pulse == 0 {
+		log.Info("Leader write to Redis", "time taken", time.Now().Sub(start), "hasErr", err != nil)
+	}
 	if err != nil {
 		log.Error("failed to post the state", "err", err)
 		RecordGroupConsensusError(ct.backendGroup, "leader_post_state", err)
@@ -345,7 +375,7 @@ func (ct *RedisConsensusTracker) postPayload(mutexVal string) {
 		return
 	}
 
-	log.Debug("posted state", "state", string(jsonState), "leader", leader)
+	log.Info("posted state", "state", string(jsonState), "leader", leader)
 
 	ct.leaderName = leader
 	ct.remote.update(ct.local.state)
