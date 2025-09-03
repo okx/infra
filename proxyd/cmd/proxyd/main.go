@@ -25,10 +25,6 @@ var (
 	GitDate    = ""
 )
 
-const (
-	podIpEnv = "MY_POD_IP"
-)
-
 func main() {
 	// Set up logger with a default INFO level in case we fail to parse flags.
 	// Otherwise the final critical log won't show what the parsing error was.
@@ -66,27 +62,9 @@ func main() {
 		}()
 	}
 
-	// non-blocking
 	_, shutdown, err := proxyd.Start(config)
 	if err != nil {
 		log.Crit("error starting proxyd", "err", err)
-	}
-
-	// Register after start.
-	if len(config.Nacos.URLs) > 0 {
-		externalIP := config.Nacos.ExternalIP
-		if os.Getenv(podIpEnv) != "" {
-			externalIP = os.Getenv(podIpEnv)
-			log.Warn("External IP replaced by env `MY_POD_IP`", "ExternalIP", externalIP)
-		}
-
-		proxyd.StartNacosClient(
-			config.Nacos.URLs,
-			config.Nacos.NamespaceId,
-			config.Nacos.ApplicationName,
-			externalIP,
-			config.Nacos.ExternalPorts,
-		)
 	}
 
 	sig := make(chan os.Signal, 1)
