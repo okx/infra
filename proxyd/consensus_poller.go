@@ -40,6 +40,10 @@ type ConsensusPoller struct {
 	maxBlockLag        uint64
 	maxBlockRange      uint64
 	interval           time.Duration
+
+	// Add global lock and execution status flag
+	updateMux  sync.Mutex
+	isUpdating bool
 }
 
 type backendState struct {
@@ -435,6 +439,23 @@ func (cp *ConsensusPoller) checkExpectedBlockTags(
 
 // UpdateBackendGroupConsensus resolves the current group consensus based on the state of the backends
 func (cp *ConsensusPoller) UpdateBackendGroupConsensus(ctx context.Context) {
+	// Check if an instance is already executing
+	cp.updateMux.Lock()
+	if cp.isUpdating {
+		log.Debug("UpdateBackendGroupConsensus already in progress, skipping")
+		cp.updateMux.Unlock()
+		return
+	}
+	cp.isUpdating = true
+	cp.updateMux.Unlock()
+
+	// Ensure execution status is reset when the method ends
+	defer func() {
+		cp.updateMux.Lock()
+		cp.isUpdating = false
+		cp.updateMux.Unlock()
+	}()
+
 	// get the latest block number from the tracker
 	currentConsensusBlockNumber := cp.GetLatestBlockNumber()
 
@@ -476,22 +497,57 @@ func (cp *ConsensusPoller) UpdateBackendGroupConsensus(ctx context.Context) {
 	if proposedBlock > 0 {
 		for !hasConsensus {
 			allAgreed := true
+
+			// Define result struct
+			type fetchResult struct {
+				be                *Backend
+				actualBlockNumber hexutil.Uint64
+				actualBlockHash   string
+				err               error
+			}
+
+			// Create channel and waitGroup
+			resultChan := make(chan fetchResult, len(candidates))
+			var wg sync.WaitGroup
+
+			// Concurrently call fetchBlock
 			for be := range candidates {
-				actualBlockNumber, actualBlockHash, err := cp.fetchBlock(ctx, be, proposedBlock.String())
-				if err != nil {
-					log.Warn("error updating backend", "name", be.Name, "err", err)
+				wg.Add(1)
+				go func(backend *Backend) {
+					defer wg.Done()
+					actualBlockNumber, actualBlockHash, err := cp.fetchBlock(ctx, backend, proposedBlock.String())
+
+					resultChan <- fetchResult{
+						be:                backend,
+						actualBlockNumber: actualBlockNumber,
+						actualBlockHash:   actualBlockHash,
+						err:               err,
+					}
+				}(be)
+			}
+
+			// Wait for all goroutines to complete
+			go func() {
+				wg.Wait()
+				close(resultChan)
+			}()
+
+			// Process results
+			for result := range resultChan {
+				if result.err != nil {
+					log.Warn("error updating backend", "name", result.be.Name, "err", result.err)
 					continue
 				}
 				if proposedBlockHash == "" {
-					proposedBlockHash = actualBlockHash
+					proposedBlockHash = result.actualBlockHash
 				}
-				blocksDontMatch := (actualBlockNumber != proposedBlock) || (actualBlockHash != proposedBlockHash)
+				blocksDontMatch := (result.actualBlockNumber != proposedBlock) || (result.actualBlockHash != proposedBlockHash)
 				if blocksDontMatch {
-					if currentConsensusBlockNumber >= actualBlockNumber {
+					if currentConsensusBlockNumber >= result.actualBlockNumber {
 						log.Warn("backend broke consensus",
-							"name", be.Name,
-							"actualBlockNumber", actualBlockNumber,
-							"actualBlockHash", actualBlockHash,
+							"name", result.be.Name,
+							"actualBlockNumber", result.actualBlockNumber,
+							"actualBlockHash", result.actualBlockHash,
 							"proposedBlock", proposedBlock,
 							"proposedBlockHash", proposedBlockHash)
 						broken = true
