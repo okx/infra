@@ -345,9 +345,38 @@ func (cp *ConsensusPoller) UpdateBackend(ctx context.Context, be *Backend) {
 		RecordConsensusBackendPeerCount(be, peerCount)
 	}
 
-	latestBlockNumber, latestBlockHash, err := cp.fetchBlock(ctx, be, "latest")
-	if err != nil {
-		log.Warn("error updating backend - latest block will not be updated", "name", be.Name, "err", err)
+	// Concurrently fetch three block types
+	var wg sync.WaitGroup
+	var latestBlockNumber, safeBlockNumber, finalizedBlockNumber hexutil.Uint64
+	var latestBlockHash string
+	var latestErr, safeErr, finalizedErr error
+
+	wg.Add(3)
+
+	// Fetch latest block
+	go func() {
+		defer wg.Done()
+		latestBlockNumber, latestBlockHash, latestErr = cp.fetchBlock(ctx, be, "latest")
+	}()
+
+	// Fetch safe block
+	go func() {
+		defer wg.Done()
+		safeBlockNumber, _, safeErr = cp.fetchBlock(ctx, be, "safe")
+	}()
+
+	// Fetch finalized block
+	go func() {
+		defer wg.Done()
+		finalizedBlockNumber, _, finalizedErr = cp.fetchBlock(ctx, be, "finalized")
+	}()
+
+	// Wait for all requests to complete
+	wg.Wait()
+
+	// Check latest block request result
+	if latestErr != nil {
+		log.Warn("error updating backend - latest block will not be updated", "name", be.Name, "err", latestErr)
 		return
 	}
 	if latestBlockNumber == 0 {
@@ -356,24 +385,22 @@ func (cp *ConsensusPoller) UpdateBackend(ctx context.Context, be *Backend) {
 		return
 	}
 
-	safeBlockNumber, _, err := cp.fetchBlock(ctx, be, "safe")
-	if err != nil {
-		log.Warn("error updating backend - safe block will not be updated", "name", be.Name, "err", err)
+	// Check safe block request result
+	if safeErr != nil {
+		log.Warn("error updating backend - safe block will not be updated", "name", be.Name, "err", safeErr)
 		return
 	}
-
 	if safeBlockNumber == 0 {
 		log.Warn("error backend responded a 200 with blockheight 0 for safe block", "name", be.Name)
 		be.intermittentErrorsSlidingWindow.Incr()
 		return
 	}
 
-	finalizedBlockNumber, _, err := cp.fetchBlock(ctx, be, "finalized")
-	if err != nil {
-		log.Warn("error updating backend - finalized block will not be updated", "name", be.Name, "err", err)
+	// Check finalized block request result
+	if finalizedErr != nil {
+		log.Warn("error updating backend - finalized block will not be updated", "name", be.Name, "err", finalizedErr)
 		return
 	}
-
 	if finalizedBlockNumber == 0 {
 		log.Warn("error backend responded a 200 with blockheight 0 for finalized block", "name", be.Name)
 		be.intermittentErrorsSlidingWindow.Incr()
