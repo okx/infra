@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -41,9 +42,8 @@ type ConsensusPoller struct {
 	maxBlockRange      uint64
 	interval           time.Duration
 
-	// Add global lock and execution status flag
-	updateMux  sync.Mutex
-	isUpdating bool
+	// Add atomic execution status flag
+	isUpdating atomic.Bool
 }
 
 type backendState struct {
@@ -467,21 +467,12 @@ func (cp *ConsensusPoller) checkExpectedBlockTags(
 // UpdateBackendGroupConsensus resolves the current group consensus based on the state of the backends
 func (cp *ConsensusPoller) UpdateBackendGroupConsensus(ctx context.Context) {
 	// Check if an instance is already executing
-	cp.updateMux.Lock()
-	if cp.isUpdating {
+	if !cp.isUpdating.CompareAndSwap(false, true) {
 		log.Debug("UpdateBackendGroupConsensus already in progress, skipping")
-		cp.updateMux.Unlock()
 		return
 	}
-	cp.isUpdating = true
-	cp.updateMux.Unlock()
 
-	// Ensure execution status is reset when the method ends
-	defer func() {
-		cp.updateMux.Lock()
-		cp.isUpdating = false
-		cp.updateMux.Unlock()
-	}()
+	defer cp.isUpdating.Store(false)
 
 	// get the latest block number from the tracker
 	currentConsensusBlockNumber := cp.GetLatestBlockNumber()
