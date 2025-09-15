@@ -439,16 +439,22 @@ func (cp *ConsensusPoller) UpdateBackend(ctx context.Context, be *Backend) {
 
 	RecordBackendUnexpectedBlockTags(be, !expectedBlockTags)
 
-	if !expectedBlockTags && !be.forcedCandidate {
-		log.Warn("backend banned - unexpected block tags",
+	if !expectedBlockTags {
+		log.Warn("backend unexpected block tags",
 			"backend", be.Name,
 			"oldFinalized", bs.finalizedBlockNumber,
 			"finalizedBlockNumber", finalizedBlockNumber,
 			"oldSafe", bs.safeBlockNumber,
 			"safeBlockNumber", safeBlockNumber,
 			"latestBlockNumber", latestBlockNumber,
+			"forcedCandidate", be.forcedCandidate,
+			"banned", !be.forcedCandidate,
 		)
-		cp.Ban(be)
+
+		// if the backend is a forced candidate we don't ban it
+		if !be.forcedCandidate {
+			cp.Ban(be)
+		}
 	}
 }
 
