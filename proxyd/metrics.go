@@ -12,6 +12,12 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	"sync"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
 const (
@@ -263,29 +269,7 @@ var (
 		Help:      "Count of errors taking frontend rate limits",
 	})
 
-	consensusLatestBlock = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: MetricsNamespace,
-		Name:      "group_consensus_latest_block",
-		Help:      "Consensus latest block",
-	}, []string{
-		"backend_group_name",
-	})
-
-	consensusSafeBlock = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: MetricsNamespace,
-		Name:      "group_consensus_safe_block",
-		Help:      "Consensus safe block",
-	}, []string{
-		"backend_group_name",
-	})
-
-	consensusFinalizedBlock = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: MetricsNamespace,
-		Name:      "group_consensus_finalized_block",
-		Help:      "Consensus finalized block",
-	}, []string{
-		"backend_group_name",
-	})
+	// OTel: block-related metrics moved to OTel observable gauges
 
 	consensusHAError = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: MetricsNamespace,
@@ -295,56 +279,9 @@ var (
 		"error",
 	})
 
-	consensusHALatestBlock = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: MetricsNamespace,
-		Name:      "group_consensus_ha_latest_block",
-		Help:      "Consensus HA latest block",
-	}, []string{
-		"backend_group_name",
-		"leader",
-	})
+	// OTel: HA block metrics moved to OTel observable gauges
 
-	consensusHASafeBlock = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: MetricsNamespace,
-		Name:      "group_consensus_ha_safe_block",
-		Help:      "Consensus HA safe block",
-	}, []string{
-		"backend_group_name",
-		"leader",
-	})
-
-	consensusHAFinalizedBlock = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: MetricsNamespace,
-		Name:      "group_consensus_ha_finalized_block",
-		Help:      "Consensus HA finalized block",
-	}, []string{
-		"backend_group_name",
-		"leader",
-	})
-
-	backendLatestBlockBackend = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: MetricsNamespace,
-		Name:      "backend_latest_block",
-		Help:      "Current latest block observed per backend",
-	}, []string{
-		"backend_name",
-	})
-
-	backendSafeBlockBackend = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: MetricsNamespace,
-		Name:      "backend_safe_block",
-		Help:      "Current safe block observed per backend",
-	}, []string{
-		"backend_name",
-	})
-
-	backendFinalizedBlockBackend = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Namespace: MetricsNamespace,
-		Name:      "backend_finalized_block",
-		Help:      "Current finalized block observed per backend",
-	}, []string{
-		"backend_name",
-	})
+	// OTel: backend block metrics moved to OTel observable gauges
 
 	backendUnexpectedBlockTagsBackend = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: MetricsNamespace,
@@ -472,6 +409,181 @@ var (
 	})
 )
 
+// =====================
+// OpenTelemetry metrics
+// =====================
+
+var (
+	otelOnce sync.Once
+
+	// state stores the latest values; OTel callbacks read from here
+	otelBlockState = struct {
+		mu sync.RWMutex
+		// group-level
+		groupLatest    map[string]float64
+		groupSafe      map[string]float64
+		groupFinalized map[string]float64
+		// HA group-level (key: group|leader)
+		haLatest    map[string]float64
+		haSafe      map[string]float64
+		haFinalized map[string]float64
+		// backend-level
+		backendLatest    map[string]float64
+		backendSafe      map[string]float64
+		backendFinalized map[string]float64
+	}{
+		groupLatest:      map[string]float64{},
+		groupSafe:        map[string]float64{},
+		groupFinalized:   map[string]float64{},
+		haLatest:         map[string]float64{},
+		haSafe:           map[string]float64{},
+		haFinalized:      map[string]float64{},
+		backendLatest:    map[string]float64{},
+		backendSafe:      map[string]float64{},
+		backendFinalized: map[string]float64{},
+	}
+)
+
+func initOTelBlockMetrics() {
+	otelOnce.Do(func() {
+		if !IsOTelEnabled() {
+			return
+		}
+		m := otel.Meter("proxyd")
+
+		// group level meters
+		mustRegisterGaugeCallback(m, "proxyd.group_consensus_latest_block", func() []Record {
+			otelBlockState.mu.RLock()
+			defer otelBlockState.mu.RUnlock()
+			out := make([]Record, 0, len(otelBlockState.groupLatest))
+			for group, v := range otelBlockState.groupLatest {
+				out = append(out, Record{Number: v, Attributes: attribute.NewSet(attribute.String("backend_group_name", group))})
+			}
+			return out
+		})
+
+		mustRegisterGaugeCallback(m, "proxyd.group_consensus_safe_block", func() []Record {
+			otelBlockState.mu.RLock()
+			defer otelBlockState.mu.RUnlock()
+			out := make([]Record, 0, len(otelBlockState.groupSafe))
+			for group, v := range otelBlockState.groupSafe {
+				out = append(out, Record{Number: v, Attributes: attribute.NewSet(attribute.String("backend_group_name", group))})
+			}
+			return out
+		})
+
+		mustRegisterGaugeCallback(m, "proxyd.group_consensus_finalized_block", func() []Record {
+			otelBlockState.mu.RLock()
+			defer otelBlockState.mu.RUnlock()
+			out := make([]Record, 0, len(otelBlockState.groupFinalized))
+			for group, v := range otelBlockState.groupFinalized {
+				out = append(out, Record{Number: v, Attributes: attribute.NewSet(attribute.String("backend_group_name", group))})
+			}
+			return out
+		})
+
+		// HA group level (group + leader)
+		mustRegisterGaugeCallback(m, "proxyd.group_consensus_ha_latest_block", func() []Record {
+			otelBlockState.mu.RLock()
+			defer otelBlockState.mu.RUnlock()
+			out := make([]Record, 0, len(otelBlockState.haLatest))
+			for key, v := range otelBlockState.haLatest {
+				parts := strings.SplitN(key, "|", 2)
+				out = append(out, Record{Number: v, Attributes: attribute.NewSet(
+					attribute.String("backend_group_name", parts[0]),
+					attribute.String("leader", parts[1]),
+				)})
+			}
+			return out
+		})
+
+		mustRegisterGaugeCallback(m, "proxyd.group_consensus_ha_safe_block", func() []Record {
+			otelBlockState.mu.RLock()
+			defer otelBlockState.mu.RUnlock()
+			out := make([]Record, 0, len(otelBlockState.haSafe))
+			for key, v := range otelBlockState.haSafe {
+				parts := strings.SplitN(key, "|", 2)
+				out = append(out, Record{Number: v, Attributes: attribute.NewSet(
+					attribute.String("backend_group_name", parts[0]),
+					attribute.String("leader", parts[1]),
+				)})
+			}
+			return out
+		})
+
+		mustRegisterGaugeCallback(m, "proxyd.group_consensus_ha_finalized_block", func() []Record {
+			otelBlockState.mu.RLock()
+			defer otelBlockState.mu.RUnlock()
+			out := make([]Record, 0, len(otelBlockState.haFinalized))
+			for key, v := range otelBlockState.haFinalized {
+				parts := strings.SplitN(key, "|", 2)
+				out = append(out, Record{Number: v, Attributes: attribute.NewSet(
+					attribute.String("backend_group_name", parts[0]),
+					attribute.String("leader", parts[1]),
+				)})
+			}
+			return out
+		})
+
+		// backend level
+		mustRegisterGaugeCallback(m, "proxyd.backend_latest_block", func() []Record {
+			otelBlockState.mu.RLock()
+			defer otelBlockState.mu.RUnlock()
+			out := make([]Record, 0, len(otelBlockState.backendLatest))
+			for be, v := range otelBlockState.backendLatest {
+				out = append(out, Record{Number: v, Attributes: attribute.NewSet(attribute.String("backend_name", be))})
+			}
+			return out
+		})
+
+		mustRegisterGaugeCallback(m, "proxyd.backend_safe_block", func() []Record {
+			otelBlockState.mu.RLock()
+			defer otelBlockState.mu.RUnlock()
+			out := make([]Record, 0, len(otelBlockState.backendSafe))
+			for be, v := range otelBlockState.backendSafe {
+				out = append(out, Record{Number: v, Attributes: attribute.NewSet(attribute.String("backend_name", be))})
+			}
+			return out
+		})
+
+		mustRegisterGaugeCallback(m, "proxyd.backend_finalized_block", func() []Record {
+			otelBlockState.mu.RLock()
+			defer otelBlockState.mu.RUnlock()
+			out := make([]Record, 0, len(otelBlockState.backendFinalized))
+			for be, v := range otelBlockState.backendFinalized {
+				out = append(out, Record{Number: v, Attributes: attribute.NewSet(attribute.String("backend_name", be))})
+			}
+			return out
+		})
+	})
+}
+
+// helper to register a gauge callback; panics on error in init
+func mustRegisterGaugeCallback(m metric.Meter, name string, collect func() []Record) {
+	g, err := m.Float64ObservableGauge(name)
+	if err != nil {
+		panic(err)
+	}
+	_, err = m.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		for _, r := range collect() {
+			o.ObserveFloat64(g, r.Number, metric.WithAttributeSet(r.Attributes))
+		}
+		return nil
+	}, g)
+	if err != nil {
+		panic(err)
+	}
+}
+
+// lightweight record model for callback collections
+type metricRecord struct {
+	Number     float64
+	Attributes attribute.Set
+}
+
+// alias name to avoid collision with package metric
+type Record = metricRecord
+
 func RecordRedisError(source string) {
 	redisErrorsTotal.WithLabelValues(source).Inc()
 }
@@ -546,27 +658,48 @@ func RecordGroupConsensusError(group *BackendGroup, label string, err error) {
 }
 
 func RecordGroupConsensusHALatestBlock(group *BackendGroup, leader string, blockNumber hexutil.Uint64) {
-	consensusHALatestBlock.WithLabelValues(group.Name, leader).Set(float64(blockNumber))
+	initOTelBlockMetrics()
+	key := fmt.Sprintf("%s|%s", group.Name, leader)
+	otelBlockState.mu.Lock()
+	otelBlockState.haLatest[key] = float64(blockNumber)
+	otelBlockState.mu.Unlock()
 }
 
 func RecordGroupConsensusHASafeBlock(group *BackendGroup, leader string, blockNumber hexutil.Uint64) {
-	consensusHASafeBlock.WithLabelValues(group.Name, leader).Set(float64(blockNumber))
+	initOTelBlockMetrics()
+	key := fmt.Sprintf("%s|%s", group.Name, leader)
+	otelBlockState.mu.Lock()
+	otelBlockState.haSafe[key] = float64(blockNumber)
+	otelBlockState.mu.Unlock()
 }
 
 func RecordGroupConsensusHAFinalizedBlock(group *BackendGroup, leader string, blockNumber hexutil.Uint64) {
-	consensusHAFinalizedBlock.WithLabelValues(group.Name, leader).Set(float64(blockNumber))
+	initOTelBlockMetrics()
+	key := fmt.Sprintf("%s|%s", group.Name, leader)
+	otelBlockState.mu.Lock()
+	otelBlockState.haFinalized[key] = float64(blockNumber)
+	otelBlockState.mu.Unlock()
 }
 
 func RecordGroupConsensusLatestBlock(group *BackendGroup, blockNumber hexutil.Uint64) {
-	consensusLatestBlock.WithLabelValues(group.Name).Set(float64(blockNumber))
+	initOTelBlockMetrics()
+	otelBlockState.mu.Lock()
+	otelBlockState.groupLatest[group.Name] = float64(blockNumber)
+	otelBlockState.mu.Unlock()
 }
 
 func RecordGroupConsensusSafeBlock(group *BackendGroup, blockNumber hexutil.Uint64) {
-	consensusSafeBlock.WithLabelValues(group.Name).Set(float64(blockNumber))
+	initOTelBlockMetrics()
+	otelBlockState.mu.Lock()
+	otelBlockState.groupSafe[group.Name] = float64(blockNumber)
+	otelBlockState.mu.Unlock()
 }
 
 func RecordGroupConsensusFinalizedBlock(group *BackendGroup, blockNumber hexutil.Uint64) {
-	consensusFinalizedBlock.WithLabelValues(group.Name).Set(float64(blockNumber))
+	initOTelBlockMetrics()
+	otelBlockState.mu.Lock()
+	otelBlockState.groupFinalized[group.Name] = float64(blockNumber)
+	otelBlockState.mu.Unlock()
 }
 
 func RecordGroupConsensusCount(group *BackendGroup, count int) {
@@ -582,15 +715,24 @@ func RecordGroupTotalCount(group *BackendGroup, count int) {
 }
 
 func RecordBackendLatestBlock(b *Backend, blockNumber hexutil.Uint64) {
-	backendLatestBlockBackend.WithLabelValues(b.Name).Set(float64(blockNumber))
+	initOTelBlockMetrics()
+	otelBlockState.mu.Lock()
+	otelBlockState.backendLatest[b.Name] = float64(blockNumber)
+	otelBlockState.mu.Unlock()
 }
 
 func RecordBackendSafeBlock(b *Backend, blockNumber hexutil.Uint64) {
-	backendSafeBlockBackend.WithLabelValues(b.Name).Set(float64(blockNumber))
+	initOTelBlockMetrics()
+	otelBlockState.mu.Lock()
+	otelBlockState.backendSafe[b.Name] = float64(blockNumber)
+	otelBlockState.mu.Unlock()
 }
 
 func RecordBackendFinalizedBlock(b *Backend, blockNumber hexutil.Uint64) {
-	backendFinalizedBlockBackend.WithLabelValues(b.Name).Set(float64(blockNumber))
+	initOTelBlockMetrics()
+	otelBlockState.mu.Lock()
+	otelBlockState.backendFinalized[b.Name] = float64(blockNumber)
+	otelBlockState.mu.Unlock()
 }
 
 func RecordBackendUnexpectedBlockTags(b *Backend, unexpected bool) {

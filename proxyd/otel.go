@@ -7,10 +7,9 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
-	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+	metricsdk "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
-	"go.opentelemetry.io/otel/sdk/trace"
 )
 
 var otelEnabled bool
@@ -23,19 +22,6 @@ func InitOpenTelemetry(ctx context.Context, cfg OTelConfig) (func(context.Contex
 	if !cfg.Enabled {
 		otelEnabled = false
 		return func(context.Context) error { return nil }, nil
-	}
-
-	opts := []otlptracegrpc.Option{}
-	if cfg.Endpoint != "" {
-		opts = append(opts, otlptracegrpc.WithEndpoint(cfg.Endpoint))
-	}
-	if cfg.Insecure {
-		opts = append(opts, otlptracegrpc.WithInsecure())
-	}
-
-	exp, err := otlptracegrpc.New(ctx, opts...)
-	if err != nil {
-		return nil, err
 	}
 
 	attrs := []attribute.KeyValue{}
@@ -56,21 +42,28 @@ func InitOpenTelemetry(ctx context.Context, cfg OTelConfig) (func(context.Contex
 		return nil, err
 	}
 
-	tp := trace.NewTracerProvider(
-		trace.WithBatcher(exp,
-			trace.WithMaxExportBatchSize(512),
-			trace.WithBatchTimeout(2*time.Second),
-		),
-		trace.WithResource(res),
+	// Metrics exporter
+	mopts := []otlpmetricgrpc.Option{}
+	if cfg.Endpoint != "" {
+		mopts = append(mopts, otlpmetricgrpc.WithEndpoint(cfg.Endpoint))
+	}
+	if cfg.Insecure {
+		mopts = append(mopts, otlpmetricgrpc.WithInsecure())
+	}
+	mexp, err := otlpmetricgrpc.New(ctx, mopts...)
+	if err != nil {
+		return nil, err
+	}
+	mp := metricsdk.NewMeterProvider(
+		metricsdk.WithResource(res),
+		metricsdk.WithReader(metricsdk.NewPeriodicReader(
+			mexp,
+			metricsdk.WithInterval(10*time.Second),
+		)),
 	)
-	otel.SetTracerProvider(tp)
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
-		propagation.TraceContext{}, propagation.Baggage{},
-	))
+	otel.SetMeterProvider(mp)
 
 	otelEnabled = true
-	log.Info("OpenTelemetry tracing initialized")
-	return tp.Shutdown, nil
+	log.Info("OpenTelemetry metrics initialized")
+	return mp.Shutdown, nil
 }
-
-
