@@ -7,7 +7,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	metricsdk "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 )
@@ -43,14 +43,14 @@ func InitOpenTelemetry(ctx context.Context, cfg OTelConfig) (func(context.Contex
 	}
 
 	// Metrics exporter
-	mopts := []otlpmetricgrpc.Option{}
+	mopts := []otlpmetrichttp.Option{}
 	if cfg.Endpoint != "" {
-		mopts = append(mopts, otlpmetricgrpc.WithEndpoint(cfg.Endpoint))
+		mopts = append(mopts, otlpmetrichttp.WithEndpoint(cfg.Endpoint))
 	}
 	if cfg.Insecure {
-		mopts = append(mopts, otlpmetricgrpc.WithInsecure())
+		mopts = append(mopts, otlpmetrichttp.WithInsecure())
 	}
-	mexp, err := otlpmetricgrpc.New(ctx, mopts...)
+	mexp, err := otlpmetrichttp.New(ctx, mopts...)
 	if err != nil {
 		return nil, err
 	}
