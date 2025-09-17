@@ -42,9 +42,9 @@ enabled = true
 service_name = "proxyd"
 service_namespace = "infra"
 # OTLP collector endpoint, e.g. "otel-collector:4317"
-endpoint = "localhost:4317"
+endpoint = "http://dev-apm.okg.com/api/v1/umd/custom/metric/gateway/v1/metrics"
 # Set true if your collector does not use TLS
-insecure = true
+insecure = false
 # Optional environment tag
 environment = "dev"
 
