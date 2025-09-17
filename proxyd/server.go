@@ -11,7 +11,6 @@ import (
 	"math"
 	"math/big"
 	"net/http"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -239,14 +238,7 @@ func (s *Server) WSListenAndServe(host string, port int) error {
 	s.srvMu.Lock()
 	hdlr := mux.NewRouter()
 	hdlr.HandleFunc("/{authorization}", s.HandleWS)
-
-	routeCorrection := os.Getenv("WS_ROUTE_CORRECTION")
-	if routeCorrection != "" {
-		hdlr.HandleFunc(routeCorrection, s.HandleWS)
-	} else {
-		hdlr.HandleFunc("/", s.HandleWS)
-	}
-
+	hdlr.HandleFunc("/{path:.*}", s.HandleWS)
 	c := cors.New(cors.Options{
 		AllowedOrigins: []string{"*"},
 	})
