@@ -10,6 +10,8 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	metricsdk "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
+	"net/url"
+	"strings"
 )
 
 var otelEnabled bool
@@ -45,7 +47,27 @@ func InitOpenTelemetry(ctx context.Context, cfg OTelConfig) (func(context.Contex
 	// Metrics exporter
 	mopts := []otlpmetrichttp.Option{}
 	if cfg.Endpoint != "" {
-		mopts = append(mopts, otlpmetrichttp.WithEndpoint(cfg.Endpoint))
+		// Support full URL like http://host/path/to/metrics or https://host/path
+		if strings.HasPrefix(strings.ToLower(cfg.Endpoint), "http://") || strings.HasPrefix(strings.ToLower(cfg.Endpoint), "https://") {
+			u, err := url.Parse(cfg.Endpoint)
+			if err == nil {
+				if u.Host != "" {
+					mopts = append(mopts, otlpmetrichttp.WithEndpoint(u.Host))
+				}
+				if u.Path != "" {
+					mopts = append(mopts, otlpmetrichttp.WithURLPath(u.Path))
+				}
+				if u.Scheme == "http" {
+					mopts = append(mopts, otlpmetrichttp.WithInsecure())
+				}
+			} else {
+				// Fallback to raw endpoint if parse fails
+				mopts = append(mopts, otlpmetrichttp.WithEndpoint(cfg.Endpoint))
+			}
+		} else {
+			// Raw host[:port]
+			mopts = append(mopts, otlpmetrichttp.WithEndpoint(cfg.Endpoint))
+		}
 	}
 	if cfg.Insecure {
 		mopts = append(mopts, otlpmetrichttp.WithInsecure())
