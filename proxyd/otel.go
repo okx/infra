@@ -46,6 +46,10 @@ func InitOpenTelemetry(ctx context.Context, cfg OTelConfig) (func(context.Contex
 
 	// Metrics exporter
 	mopts := []otlpmetrichttp.Option{}
+	// protocol: support explicit "http/protobuf" to be compatible with some gateways (default already http/protobuf)
+	if strings.EqualFold(cfg.Protocol, "http/protobuf") || cfg.Protocol == "" {
+		mopts = append(mopts, otlpmetrichttp.WithCompression(otlpmetrichttp.GzipCompression))
+	}
 	if cfg.Endpoint != "" {
 		// Support full URL like http://host/path/to/metrics or https://host/path
 		if strings.HasPrefix(strings.ToLower(cfg.Endpoint), "http://") || strings.HasPrefix(strings.ToLower(cfg.Endpoint), "https://") {

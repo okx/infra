@@ -287,4 +287,5 @@ type OTelConfig struct {
     Endpoint      string `toml:"endpoint"`
     Insecure      bool   `toml:"insecure"`
     Environment   string `toml:"environment"`
+    Protocol      string `toml:"protocol"`
 }
