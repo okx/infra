@@ -28,6 +28,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/cors"
 	"github.com/syndtr/goleveldb/leveldb/opt"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 const (
@@ -225,8 +226,12 @@ func (s *Server) RPCListenAndServe(host string, port int) error {
 		AllowedOrigins: []string{"*"},
 	})
 	addr := fmt.Sprintf("%s:%d", host, port)
+	var handler http.Handler = c.Handler(hdlr)
+	if IsOTelEnabled() {
+		handler = otelhttp.NewHandler(handler, "proxyd-http")
+	}
 	s.rpcServer = &http.Server{
-		Handler: instrumentedHdlr(c.Handler(hdlr)),
+		Handler: instrumentedHdlr(handler),
 		Addr:    addr,
 	}
 	log.Info("starting HTTP server", "addr", addr)
@@ -243,8 +248,12 @@ func (s *Server) WSListenAndServe(host string, port int) error {
 		AllowedOrigins: []string{"*"},
 	})
 	addr := fmt.Sprintf("%s:%d", host, port)
+	var handler http.Handler = c.Handler(hdlr)
+	if IsOTelEnabled() {
+		handler = otelhttp.NewHandler(handler, "proxyd-ws")
+	}
 	s.wsServer = &http.Server{
-		Handler: instrumentedHdlr(c.Handler(hdlr)),
+		Handler: instrumentedHdlr(handler),
 		Addr:    addr,
 	}
 	log.Info("starting WS server", "addr", addr)

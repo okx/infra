@@ -243,6 +243,7 @@ type Config struct {
 	WhitelistErrorMessage   string                  `toml:"whitelist_error_message"`
 	SenderRateLimit         SenderRateLimitConfig   `toml:"sender_rate_limit"`
 	InteropValidationConfig InteropValidationConfig `toml:"interop_validation"`
+	OTel                    OTelConfig              `toml:"otel"`
 }
 
 type InteropValidationConfig struct {
@@ -277,4 +278,13 @@ func ReadFromEnvOrConfig(value string) (string, error) {
 	}
 
 	return value, nil
+}
+
+type OTelConfig struct {
+    Enabled       bool   `toml:"enabled"`
+    ServiceName   string `toml:"service_name"`
+    ServiceNamespace string `toml:"service_namespace"`
+    Endpoint      string `toml:"endpoint"`
+    Insecure      bool   `toml:"insecure"`
+    Environment   string `toml:"environment"`
 }

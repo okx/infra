@@ -35,6 +35,19 @@ host = "0.0.0.0"
 # Port for the above.
 port = 9761
 
+[otel]
+# Enable OpenTelemetry tracing (OTLP gRPC)
+enabled = false
+# service_name defaults to "proxyd" if empty
+service_name = "proxyd"
+service_namespace = "infra"
+# OTLP collector endpoint, e.g. "otel-collector:4317"
+endpoint = ""
+# Set true if your collector does not use TLS
+insecure = true
+# Optional environment tag
+environment = "dev"
+
 [backend]
 # How long proxyd should wait for a backend response before timing out.
 response_timeout_seconds = 5

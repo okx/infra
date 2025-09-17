@@ -39,6 +39,14 @@ func Start(config *Config) (*Server, func(), error) {
 		}
 	}
 
+	// Initialize OpenTelemetry (best-effort)
+	shutdownOTel, err := InitOpenTelemetry(context.Background(), config.OTel)
+	if err != nil {
+		log.Warn("failed to initialize OpenTelemetry", "err", err)
+	} else if IsOTelEnabled() {
+		log.Info("OpenTelemetry enabled")
+	}
+
 	// redis primary client
 	var redisClient redis.UniversalClient
 	if config.Redis.URL != "" {
@@ -569,7 +577,14 @@ func Start(config *Config) (*Server, func(), error) {
 		log.Info("goodbye")
 	}
 
-	return srv, shutdownFunc, nil
+	return srv, func() {
+		shutdownFunc()
+		if IsOTelEnabled() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = shutdownOTel(ctx)
+		}
+	}, nil
 }
 
 func validateReceiptsTarget(val string) (string, error) {

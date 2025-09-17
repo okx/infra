@@ -28,6 +28,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/xaionaro-go/weightedshuffle"
 	"golang.org/x/sync/semaphore"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 const (
@@ -545,6 +546,13 @@ func NewBackend(
 	}
 
 	backend.Override(opts...)
+
+	// Wrap transport with OTel once options have been applied (TLS, etc.).
+	if IsOTelEnabled() {
+		if tr, ok := backend.client.Transport.(*http.Transport); ok {
+			backend.client.Transport = otelhttp.NewTransport(tr)
+		}
+	}
 
 	if !backend.stripTrailingXFF && backend.proxydIP == "" {
 		log.Warn("proxied requests' XFF header will not contain the proxyd ip address")
