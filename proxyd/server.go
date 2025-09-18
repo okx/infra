@@ -237,8 +237,10 @@ func (s *Server) RPCListenAndServe(host string, port int) error {
 func (s *Server) WSListenAndServe(host string, port int) error {
 	s.srvMu.Lock()
 	hdlr := mux.NewRouter()
+	// Original intent
+	hdlr.HandleFunc("/", s.HandleWS)
 	hdlr.HandleFunc("/{authorization}", s.HandleWS)
-	hdlr.HandleFunc("/{path:.*}", s.HandleWS)
+	hdlr.HandleFunc("/{path:.+/.+}", s.HandleWS) // 2 or more segments
 	c := cors.New(cors.Options{
 		AllowedOrigins: []string{"*"},
 	})
