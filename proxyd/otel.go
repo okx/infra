@@ -28,7 +28,7 @@ type MetricsClient struct {
 	commonLabels []attribute.KeyValue
 }
 
-func NewMetricsClient(ctx context.Context, serviceName string, metricsURL string, namespace string, commonLabels []attribute.KeyValue) (*MetricsClient, error) {
+func NewMetricsClient(ctx context.Context, serviceName string, metricsURL string, namespace string, commonLabels []attribute.KeyValue, exportInterval time.Duration) (*MetricsClient, error) {
 	// 解析 URL 获取 endpoint 和 path
 	u, err := url.Parse(metricsURL)
 	if err != nil {
@@ -52,7 +52,7 @@ func NewMetricsClient(ctx context.Context, serviceName string, metricsURL string
 	)
 	provider := sdkmetric.NewMeterProvider(
 		sdkmetric.WithResource(res),
-		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(1*time.Second))),
+		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(exportInterval))),
 	)
 	otel.SetMeterProvider(provider)
 	meter := provider.Meter(serviceName)

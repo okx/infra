@@ -41,15 +41,16 @@ enabled = true
 # service_name defaults to "proxyd" if empty
 service_name = "proxyd"
 # OTLP metrics endpoint URL
-metrics_url = ""
+metrics_url = "http://okone-umd-custom-metric-main.forked-dev-okone-sit.svc.dev.local:7001/api/v1/umd/custom/metric/gateway/v1/metrics"
 # Namespace for metrics (defaults to "proxyd" if empty)
 namespace = "proxyd"
+# Export interval for metrics (defaults to "5s" if empty)
+export_interval = "0.4s"
 
 # Common labels are read from environment variables:
-# INSTANCE - instance identifier (e.g., "10.36.111.14:7002")
-# HOST - host address (e.g., "10.36.111.14")
-# JOB - job name (e.g., "okx-defi-xlayer-egseqx-pre")
-# DEPLOY_VERSION - deployment version (e.g., "20250902080643033")
+# MY_POD_IP - instance and host identifier (e.g., "10.36.111.14")
+# MY_SERVICE_NAME - job name (e.g., "okx-defi-xlayer-egseqx-pre")
+# OKONE_DEPLOY_VERSION - deployment version (e.g., "20250902080643033")
 
 [backend]
 # How long proxyd should wait for a backend response before timing out.

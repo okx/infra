@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/BurntSushi/toml"
 
@@ -111,7 +112,13 @@ func main() {
 			namespace = "proxyd"
 		}
 
-		metricsClient, err = proxyd.NewMetricsClient(ctx, serviceName, config.OTel.MetricsURL, namespace, commonLabels)
+		// Use configured export interval or default to 5 seconds
+		exportInterval := time.Duration(config.OTel.ExportInterval)
+		if exportInterval <= 0 {
+			exportInterval = 5 * time.Second
+		}
+
+		metricsClient, err = proxyd.NewMetricsClient(ctx, serviceName, config.OTel.MetricsURL, namespace, commonLabels, exportInterval)
 		if err != nil {
 			log.Crit("error initializing OTEL metrics client", "err", err)
 		}

@@ -58,10 +58,11 @@ type MetricsConfig struct {
 }
 
 type OTelConfig struct {
-	Enabled     bool   `toml:"enabled"`
-	ServiceName string `toml:"service_name"`
-	MetricsURL  string `toml:"metrics_url"`
-	Namespace   string `toml:"namespace"`
+	Enabled        bool         `toml:"enabled"`
+	ServiceName    string       `toml:"service_name"`
+	MetricsURL     string       `toml:"metrics_url"`
+	Namespace      string       `toml:"namespace"`
+	ExportInterval TOMLDuration `toml:"export_interval"`
 }
 
 type RateLimitConfig struct {
