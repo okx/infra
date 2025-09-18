@@ -29,7 +29,7 @@ type MetricsClient struct {
 }
 
 func NewMetricsClient(ctx context.Context, serviceName string, metricsURL string, namespace string, commonLabels []attribute.KeyValue, exportInterval time.Duration) (*MetricsClient, error) {
-	// 解析 URL 获取 endpoint 和 path
+	// Parse URL to get endpoint and path
 	u, err := url.Parse(metricsURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse metrics URL fail: %w", err)

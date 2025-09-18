@@ -23,9 +23,9 @@ max_concurrent_rpcs = 1000
 # Server log level
 log_level = "info"
 
-[redis]
+#[redis]
 # URL to a Redis instance.
-url = "redis://localhost:6379"
+#url = "redis://localhost:6379"
 
 [metrics]
 # Whether or not to enable Prometheus metrics.
@@ -41,7 +41,7 @@ enabled = true
 # service_name defaults to "proxyd" if empty
 service_name = "proxyd"
 # OTLP metrics endpoint URL
-metrics_url = "http://okone-umd-custom-metric-main.forked-dev-okone-sit.svc.dev.local:7001/api/v1/umd/custom/metric/gateway/v1/metrics"
+metrics_url = ""
 # Namespace for metrics (defaults to "proxyd" if empty)
 namespace = "proxyd"
 # Export interval for metrics (defaults to "5s" if empty)

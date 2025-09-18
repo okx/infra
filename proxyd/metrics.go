@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/log"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -557,17 +558,33 @@ func RecordGroupConsensusError(group *BackendGroup, label string, err error) {
 	consensusHAError.WithLabelValues(label).Inc()
 }
 
+// recordOTelGauge records OTEL gauge metric with error handling
+func recordOTelGauge(ctx context.Context, name, description string, value float64, attrs ...attribute.KeyValue) {
+	if otelClient != nil {
+		if err := otelClient.GaugeRecord(ctx, name, description, value, attrs...); err != nil {
+			log.Error("failed to record OTEL gauge metric", "metric", name, "error", err)
+		}
+	}
+}
+
+// recordOTelCounter records OTEL counter metric with error handling
+func recordOTelCounter(ctx context.Context, name, description string, value int64, attrs ...attribute.KeyValue) {
+	if otelClient != nil {
+		if err := otelClient.CounterAdd(ctx, name, description, value, attrs...); err != nil {
+			log.Error("failed to record OTEL counter metric", "metric", name, "error", err)
+		}
+	}
+}
+
 func RecordGroupConsensusHALatestBlock(group *BackendGroup, leader string, blockNumber hexutil.Uint64) {
 	// Keep Prometheus for compatibility
 	consensusHALatestBlock.WithLabelValues(group.Name, leader).Set(float64(blockNumber))
 
 	// Use OTEL if available
-	if otelClient != nil {
-		ctx := context.Background()
-		otelClient.GaugeRecord(ctx, "group_consensus_ha_latest_block", "Consensus HA latest block", float64(blockNumber),
-			attribute.String("backend_group_name", group.Name),
-			attribute.String("leader", leader))
-	}
+	ctx := context.Background()
+	recordOTelGauge(ctx, "group_consensus_ha_latest_block", "Consensus HA latest block", float64(blockNumber),
+		attribute.String("backend_group_name", group.Name),
+		attribute.String("leader", leader))
 }
 
 func RecordGroupConsensusHASafeBlock(group *BackendGroup, leader string, blockNumber hexutil.Uint64) {
@@ -575,12 +592,10 @@ func RecordGroupConsensusHASafeBlock(group *BackendGroup, leader string, blockNu
 	consensusHASafeBlock.WithLabelValues(group.Name, leader).Set(float64(blockNumber))
 
 	// Use OTEL if available
-	if otelClient != nil {
-		ctx := context.Background()
-		otelClient.GaugeRecord(ctx, "group_consensus_ha_safe_block", "Consensus HA safe block", float64(blockNumber),
-			attribute.String("backend_group_name", group.Name),
-			attribute.String("leader", leader))
-	}
+	ctx := context.Background()
+	recordOTelGauge(ctx, "group_consensus_ha_safe_block", "Consensus HA safe block", float64(blockNumber),
+		attribute.String("backend_group_name", group.Name),
+		attribute.String("leader", leader))
 }
 
 func RecordGroupConsensusHAFinalizedBlock(group *BackendGroup, leader string, blockNumber hexutil.Uint64) {
@@ -588,12 +603,10 @@ func RecordGroupConsensusHAFinalizedBlock(group *BackendGroup, leader string, bl
 	consensusHAFinalizedBlock.WithLabelValues(group.Name, leader).Set(float64(blockNumber))
 
 	// Use OTEL if available
-	if otelClient != nil {
-		ctx := context.Background()
-		otelClient.GaugeRecord(ctx, "group_consensus_ha_finalized_block", "Consensus HA finalized block", float64(blockNumber),
-			attribute.String("backend_group_name", group.Name),
-			attribute.String("leader", leader))
-	}
+	ctx := context.Background()
+	recordOTelGauge(ctx, "group_consensus_ha_finalized_block", "Consensus HA finalized block", float64(blockNumber),
+		attribute.String("backend_group_name", group.Name),
+		attribute.String("leader", leader))
 }
 
 func RecordGroupConsensusLatestBlock(group *BackendGroup, blockNumber hexutil.Uint64) {
@@ -601,11 +614,9 @@ func RecordGroupConsensusLatestBlock(group *BackendGroup, blockNumber hexutil.Ui
 	consensusLatestBlock.WithLabelValues(group.Name).Set(float64(blockNumber))
 
 	// Use OTEL if available
-	if otelClient != nil {
-		ctx := context.Background()
-		otelClient.GaugeRecord(ctx, "group_consensus_latest_block", "Consensus latest block", float64(blockNumber),
-			attribute.String("backend_group_name", group.Name))
-	}
+	ctx := context.Background()
+	recordOTelGauge(ctx, "group_consensus_latest_block", "Consensus latest block", float64(blockNumber),
+		attribute.String("backend_group_name", group.Name))
 }
 
 func RecordGroupConsensusSafeBlock(group *BackendGroup, blockNumber hexutil.Uint64) {
@@ -613,11 +624,9 @@ func RecordGroupConsensusSafeBlock(group *BackendGroup, blockNumber hexutil.Uint
 	consensusSafeBlock.WithLabelValues(group.Name).Set(float64(blockNumber))
 
 	// Use OTEL if available
-	if otelClient != nil {
-		ctx := context.Background()
-		otelClient.GaugeRecord(ctx, "group_consensus_safe_block", "Consensus safe block", float64(blockNumber),
-			attribute.String("backend_group_name", group.Name))
-	}
+	ctx := context.Background()
+	recordOTelGauge(ctx, "group_consensus_safe_block", "Consensus safe block", float64(blockNumber),
+		attribute.String("backend_group_name", group.Name))
 }
 
 func RecordGroupConsensusFinalizedBlock(group *BackendGroup, blockNumber hexutil.Uint64) {
@@ -625,11 +634,9 @@ func RecordGroupConsensusFinalizedBlock(group *BackendGroup, blockNumber hexutil
 	consensusFinalizedBlock.WithLabelValues(group.Name).Set(float64(blockNumber))
 
 	// Use OTEL if available
-	if otelClient != nil {
-		ctx := context.Background()
-		otelClient.GaugeRecord(ctx, "group_consensus_finalized_block", "Consensus finalized block", float64(blockNumber),
-			attribute.String("backend_group_name", group.Name))
-	}
+	ctx := context.Background()
+	recordOTelGauge(ctx, "group_consensus_finalized_block", "Consensus finalized block", float64(blockNumber),
+		attribute.String("backend_group_name", group.Name))
 }
 
 func RecordGroupConsensusCount(group *BackendGroup, count int) {
@@ -649,11 +656,9 @@ func RecordBackendLatestBlock(b *Backend, blockNumber hexutil.Uint64) {
 	backendLatestBlockBackend.WithLabelValues(b.Name).Set(float64(blockNumber))
 
 	// Use OTEL if available
-	if otelClient != nil {
-		ctx := context.Background()
-		otelClient.GaugeRecord(ctx, "backend_latest_block", "Current latest block observed per backend", float64(blockNumber),
-			attribute.String("backend_name", b.Name))
-	}
+	ctx := context.Background()
+	recordOTelGauge(ctx, "backend_latest_block", "Current latest block observed per backend", float64(blockNumber),
+		attribute.String("backend_name", b.Name))
 }
 
 func RecordBackendSafeBlock(b *Backend, blockNumber hexutil.Uint64) {
@@ -661,11 +666,9 @@ func RecordBackendSafeBlock(b *Backend, blockNumber hexutil.Uint64) {
 	backendSafeBlockBackend.WithLabelValues(b.Name).Set(float64(blockNumber))
 
 	// Use OTEL if available
-	if otelClient != nil {
-		ctx := context.Background()
-		otelClient.GaugeRecord(ctx, "backend_safe_block", "Current safe block observed per backend", float64(blockNumber),
-			attribute.String("backend_name", b.Name))
-	}
+	ctx := context.Background()
+	recordOTelGauge(ctx, "backend_safe_block", "Current safe block observed per backend", float64(blockNumber),
+		attribute.String("backend_name", b.Name))
 }
 
 func RecordBackendFinalizedBlock(b *Backend, blockNumber hexutil.Uint64) {
@@ -673,11 +676,9 @@ func RecordBackendFinalizedBlock(b *Backend, blockNumber hexutil.Uint64) {
 	backendFinalizedBlockBackend.WithLabelValues(b.Name).Set(float64(blockNumber))
 
 	// Use OTEL if available
-	if otelClient != nil {
-		ctx := context.Background()
-		otelClient.GaugeRecord(ctx, "backend_finalized_block", "Current finalized block observed per backend", float64(blockNumber),
-			attribute.String("backend_name", b.Name))
-	}
+	ctx := context.Background()
+	recordOTelGauge(ctx, "backend_finalized_block", "Current finalized block observed per backend", float64(blockNumber),
+		attribute.String("backend_name", b.Name))
 }
 
 func RecordBackendUnexpectedBlockTags(b *Backend, unexpected bool) {
@@ -685,11 +686,9 @@ func RecordBackendUnexpectedBlockTags(b *Backend, unexpected bool) {
 	backendUnexpectedBlockTagsBackend.WithLabelValues(b.Name).Set(boolToFloat64(unexpected))
 
 	// Use OTEL if available
-	if otelClient != nil {
-		ctx := context.Background()
-		otelClient.GaugeRecord(ctx, "backend_unexpected_block_tags", "Bool gauge for unexpected block tags", boolToFloat64(unexpected),
-			attribute.String("backend_name", b.Name))
-	}
+	ctx := context.Background()
+	recordOTelGauge(ctx, "backend_unexpected_block_tags", "Bool gauge for unexpected block tags", boolToFloat64(unexpected),
+		attribute.String("backend_name", b.Name))
 }
 
 func RecordConsensusBackendBanned(b *Backend, banned bool) {
