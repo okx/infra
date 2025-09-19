@@ -63,6 +63,7 @@ func NewMetricsClient(ctx context.Context, serviceName string, metricsURL string
 		commonLabels: commonLabels,
 	}, nil
 }
+
 func (c *MetricsClient) Counter(name, description string) (metric.Int64Counter, error) {
 	if counter, loaded := c.counters.Load(name); loaded {
 		return counter.(metric.Int64Counter), nil
@@ -80,6 +81,7 @@ func (c *MetricsClient) Counter(name, description string) (metric.Int64Counter, 
 	}
 	return counter, nil
 }
+
 func (c *MetricsClient) Gauge(name, description string) (metric.Float64Gauge, error) {
 	if gauge, loaded := c.gauges.Load(name); loaded {
 		return gauge.(metric.Float64Gauge), nil
@@ -127,6 +129,7 @@ func (c *MetricsClient) GaugeRecord(ctx context.Context, name string, descriptio
 	gauge.Record(ctx, value, recordOpts...)
 	return nil
 }
+
 func (c *MetricsClient) Histogram(name, description string) (metric.Float64Histogram, error) {
 	if histogram, loaded := c.histogram.Load(name); loaded {
 		return histogram.(metric.Float64Histogram), nil
@@ -144,6 +147,7 @@ func (c *MetricsClient) Histogram(name, description string) (metric.Float64Histo
 	}
 	return histogram, nil
 }
+
 func (c *MetricsClient) Close(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -153,6 +157,7 @@ func (c *MetricsClient) Close(ctx context.Context) error {
 	}
 	return nil
 }
+
 func (c *MetricsClient) CounterAdd(ctx context.Context, name string, description string, value int64, attrs ...attribute.KeyValue) error {
 	fullName, allLabels := c.addNamespaceAndCommonLabels(name, attrs...)
 	counter, err := c.Counter(fullName, description)
@@ -165,6 +170,7 @@ func (c *MetricsClient) CounterAdd(ctx context.Context, name string, description
 	counter.Add(ctx, value, recordOpts...)
 	return nil
 }
+
 func (c *MetricsClient) Upgrade() metric.Meter {
 	return c.meter
 }
