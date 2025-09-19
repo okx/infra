@@ -7,6 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	metrics_trace "github.com/ethereum-optimism/infra/proxyd/metrics/trace"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"io"
 	"math"
 	"math/big"
@@ -86,6 +91,7 @@ type Server struct {
 	rateLimitHeader         string
 	interopValidatingConfig InteropValidationConfig
 	interopStrategy         InteropStrategy
+	tracer                  trace.Tracer
 }
 
 type limiterFunc func(method string) bool
@@ -212,6 +218,7 @@ func NewServer(
 		rateLimitHeader:         rateLimitHeader,
 		interopValidatingConfig: interopValidatingConfig,
 		interopStrategy:         interopStrategy,
+		tracer:                  otel.Tracer("Server"),
 	}, nil
 }
 
@@ -279,6 +286,9 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, s.timeout)
 	defer cancel()
+
+	ctx, span := metrics_trace.RecordSingleSpanWithoutFilter(s.tracer, ctx, "HandleRPC")
+	defer metrics_trace.CloseSpan(span)
 
 	origin := r.Header.Get("Origin")
 	userAgent := r.Header.Get("User-Agent")
@@ -348,6 +358,7 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 		)
 	}
 
+	// the batch case
 	if IsBatch(body) {
 		reqs, err := ParseBatchRPCReq(body)
 		if err != nil {
@@ -370,7 +381,7 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		batchRes, batchContainsCached, servedBy, err := s.handleBatchRPC(ctx, reqs, isLimited, true)
+		batchRes, batchContainsCached, servedBy, err := s.handleBatchRPC(span, ctx, reqs, isLimited, true)
 		if err == context.DeadlineExceeded {
 			writeRPCError(ctx, w, nil, ErrGatewayTimeout)
 			return
@@ -392,8 +403,9 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// the single case
 	rawBody := json.RawMessage(body)
-	backendRes, cached, servedBy, err := s.handleBatchRPC(ctx, []json.RawMessage{rawBody}, isLimited, false)
+	backendRes, cached, servedBy, err := s.handleBatchRPC(span, ctx, []json.RawMessage{rawBody}, isLimited, false)
 	if err != nil {
 		if errors.Is(err, ErrConsensusGetReceiptsCantBeBatched) ||
 			errors.Is(err, ErrConsensusGetReceiptsInvalidTarget) {
@@ -483,7 +495,8 @@ func (s *Server) validateInteropSendRpcRequest(ctx context.Context, tx *types.Tr
 	return finalErr
 }
 
-func (s *Server) handleBatchRPC(ctx context.Context, reqs []json.RawMessage, isLimited limiterFunc, isBatch bool) ([]*RPCRes, bool, string, error) {
+func (s *Server) handleBatchRPC(span trace.Span, ctx context.Context, reqs []json.RawMessage, isLimited limiterFunc, isBatch bool) ([]*RPCRes, bool, string, error) {
+	metrics_trace.SetSpanAttribute(span, attribute.Int("request.size", len(reqs)))
 	// A request set is transformed into groups of batches.
 	// Each batch group maps to a forwarded JSON-RPC batch request (subject to maxUpstreamBatchSize constraints)
 	// A groupID is used to decouple Requests that have duplicate ID so they're not part of the same batch that's
@@ -499,14 +512,18 @@ func (s *Server) handleBatchRPC(ctx context.Context, reqs []json.RawMessage, isL
 	batches := make(map[batchGroup][]batchElem)
 	ids := make(map[string]int, len(reqs))
 
+	methodList := make([]string, len(reqs))
+	errs := make([]error, 0, len(reqs))
+
 	for i := range reqs {
 		parsedReq, err := ParseRPCReq(reqs[i])
+		errs[i] = nil
 		if err != nil {
 			log.Info("error parsing RPC call", "source", "rpc", "err", err)
 			responses[i] = NewRPCErrorRes(nil, err)
+			errs[i] = err
 			continue
 		}
-
 		// Simple health check
 		if len(reqs) == 1 && parsedReq.Method == proxydHealthzMethod {
 			res := &RPCRes{
@@ -517,9 +534,11 @@ func (s *Server) handleBatchRPC(ctx context.Context, reqs []json.RawMessage, isL
 			return []*RPCRes{res}, false, "", nil
 		}
 
+		methodList[i] = parsedReq.Method
 		if err := ValidateRPCReq(parsedReq); err != nil {
 			RecordRPCError(ctx, BackendProxyd, MethodUnknown, err)
 			responses[i] = NewRPCErrorRes(nil, err)
+			errs[i] = err
 			continue
 		}
 
@@ -541,6 +560,7 @@ func (s *Server) handleBatchRPC(ctx context.Context, reqs []json.RawMessage, isL
 			)
 			RecordRPCError(ctx, BackendProxyd, MethodUnknown, ErrMethodNotWhitelisted)
 			responses[i] = NewRPCErrorRes(parsedReq.ID, ErrMethodNotWhitelisted)
+			errs[i] = ErrMethodNotWhitelisted
 			continue
 		}
 
@@ -554,6 +574,7 @@ func (s *Server) handleBatchRPC(ctx context.Context, reqs []json.RawMessage, isL
 			)
 			RecordRPCError(ctx, BackendProxyd, parsedReq.Method, ErrOverRateLimit)
 			responses[i] = NewRPCErrorRes(parsedReq.ID, ErrOverRateLimit)
+			errs[i] = ErrOverRateLimit
 			continue
 		}
 
@@ -567,6 +588,7 @@ func (s *Server) handleBatchRPC(ctx context.Context, reqs []json.RawMessage, isL
 			)
 			RecordRPCError(ctx, BackendProxyd, parsedReq.Method, ErrOverRateLimit)
 			responses[i] = NewRPCErrorRes(parsedReq.ID, ErrOverRateLimit)
+			errs[i] = ErrOverRateLimit
 			continue
 		}
 
@@ -578,16 +600,19 @@ func (s *Server) handleBatchRPC(ctx context.Context, reqs []json.RawMessage, isL
 			if err != nil {
 				RecordRPCError(ctx, BackendProxyd, parsedReq.Method, err)
 				responses[i] = NewRPCErrorRes(parsedReq.ID, err)
+				errs[i] = err
 				continue
 			}
 			if err := s.rateLimitSender(ctx, tx); err != nil {
 				RecordRPCError(ctx, BackendProxyd, parsedReq.Method, err)
 				responses[i] = NewRPCErrorRes(parsedReq.ID, err)
+				errs[i] = err
 				continue
 			}
 			if err := s.validateInteropSendRpcRequest(ctx, tx); err != nil {
 				RecordRPCError(ctx, BackendProxyd, parsedReq.Method, err)
 				responses[i] = NewRPCErrorRes(parsedReq.ID, err)
+				errs[i] = err
 				continue
 			}
 
@@ -600,6 +625,8 @@ func (s *Server) handleBatchRPC(ctx context.Context, reqs []json.RawMessage, isL
 		batchGroup := batchGroup{groupID: batchGroupID, backendGroup: group}
 		batches[batchGroup] = append(batches[batchGroup], batchElem{parsedReq, i})
 	}
+	metrics_trace.RecordErrors(span, errs)
+	metrics_trace.RecordAttributes(span, "method", methodList)
 
 	servedBy := make(map[string]bool, 0)
 	var cached bool
@@ -626,6 +653,7 @@ func (s *Server) handleBatchRPC(ctx context.Context, reqs []json.RawMessage, isL
 					"batch_index", i,
 				)
 				batchRPCShortCircuitsTotal.Inc()
+				metrics_trace.RecordError(span, context.DeadlineExceeded)
 				return nil, false, "", context.DeadlineExceeded
 			}
 
@@ -746,6 +774,13 @@ func (s *Server) populateContext(w http.ResponseWriter, r *http.Request) context
 		ctx = context.WithValue(ctx, ContextKeyAuth, s.authenticatedPaths[authorization]) // nolint:staticcheck
 	}
 
+	// for the trace context
+	if metrics_trace.GlobalTraceConfig.Enabled {
+		ctx = context.WithValue(ctx, metrics_trace.RemoteAddrKey, r.RemoteAddr)
+		ctx = context.WithValue(ctx, metrics_trace.LocalAddrKey, r.Host)
+		ctx = otel.GetTextMapPropagator().Extract(ctx,
+			propagation.HeaderCarrier(r.Header))
+	}
 	return context.WithValue(
 		ctx,
 		ContextKeyReqID, // nolint:staticcheck

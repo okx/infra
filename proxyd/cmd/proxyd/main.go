@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/ethereum-optimism/infra/proxyd/metrics/trace"
 	"log/slog"
 	"net"
 	"net/http"
@@ -44,9 +45,14 @@ func main() {
 	}
 
 	config := new(proxyd.Config)
+	// create the default openTelemetry trace config
+	proxydVersion := GitCommit + "-" + GitDate
+	config.OpenTelemetryTrace = trace.NewTraceConfig(proxydVersion)
 	if _, err := toml.DecodeFile(os.Args[1], config); err != nil {
 		log.Crit("error reading config file", "err", err)
 	}
+	trace.InitTraceConfig(&config.OpenTelemetryTrace)
+	trace.GlobalTraceConfig = &config.OpenTelemetryTrace
 
 	// update log level from config
 	logLevel, err := LevelFromString(config.Server.LogLevel)
@@ -127,6 +133,14 @@ func main() {
 		// Set the global OTEL client for metrics
 		proxyd.SetOTelClient(metricsClient)
 	}
+
+	// init the trace
+	traceProvider, err := trace.InitTracer(&config.OpenTelemetryTrace)
+	if err != nil {
+		log.Error("Failed to initialize OpenTelemetry tracer", "err", err)
+		return
+	}
+	defer traceProvider.Shutdown(context.Background())
 
 	// non-blocking
 	_, shutdown, err := proxyd.Start(config)

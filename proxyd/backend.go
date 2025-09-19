@@ -7,6 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	metrics_tracer "github.com/ethereum-optimism/infra/proxyd/metrics/trace"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"io"
 	"math"
 	"math/rand"
@@ -323,6 +328,7 @@ type Backend struct {
 	intermittentErrorsSlidingWindow *sw.AvgSlidingWindow
 
 	weight int
+	tracer trace.Tracer
 }
 
 type BackendOpt func(b *Backend)
@@ -542,6 +548,7 @@ func NewBackend(
 		latencySlidingWindow:            sw.NewSlidingWindow(),
 		networkRequestsSlidingWindow:    sw.NewSlidingWindow(),
 		intermittentErrorsSlidingWindow: sw.NewSlidingWindow(),
+		tracer:                          otel.Tracer("backend"),
 	}
 
 	backend.Override(opts...)
@@ -699,6 +706,18 @@ func (b *Backend) ForwardRPC(ctx context.Context, res *RPCRes, id string, method
 }
 
 func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool) ([]*RPCRes, error) {
+	ctx, span := metrics_tracer.RecordSingleSpanWithoutFilter(b.tracer, ctx,
+		"doForward", attribute.Int("batchSize", len(rpcReqs)))
+	defer metrics_tracer.CloseSpan(span)
+
+	methodList := make([]string, len(rpcReqs))
+	if span != nil && len(rpcReqs) > 0 {
+		for i, req := range rpcReqs {
+			methodList[i] = req.Method
+		}
+		metrics_tracer.RecordAttributes(span, "method", methodList)
+	}
+
 	// we are concerned about network error rates, so we record 1 request independently of how many are in the batch
 	b.networkRequestsSlidingWindow.Incr()
 
@@ -719,6 +738,7 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 				var reqParams []rpc.BlockNumberOrHash
 				err := json.Unmarshal(rpcReq.Params, &reqParams)
 				if err != nil {
+					metrics_tracer.RecordError(span, err)
 					return nil, ErrInvalidRequest("invalid request")
 				}
 
@@ -770,7 +790,12 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 	if err != nil {
 		b.intermittentErrorsSlidingWindow.Incr()
 		RecordBackendNetworkErrorRateSlidingWindow(b, b.ErrorRate())
+		metrics_tracer.RecordError(span, err)
 		return nil, wrapErr(err, "error creating backend request")
+	}
+	if span != nil {
+		// inject the trace context
+		otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(httpReq.Header))
 	}
 
 	if b.authPassword != "" {
@@ -804,6 +829,7 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 			RecordBackendNetworkErrorRateSlidingWindow(b, b.ErrorRate())
 		}
 		if errors.Is(err, ErrContextCanceled) {
+			metrics_tracer.RecordError(span, err)
 			return nil, err
 		}
 		return nil, wrapErr(err, "error in backend request")
@@ -825,6 +851,7 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 	if httpRes.StatusCode != 200 && httpRes.StatusCode != 400 {
 		b.intermittentErrorsSlidingWindow.Incr()
 		RecordBackendNetworkErrorRateSlidingWindow(b, b.ErrorRate())
+		metrics_tracer.RecordError(span, fmt.Errorf("response code %d", httpRes.StatusCode))
 		return nil, fmt.Errorf("response code %d", httpRes.StatusCode)
 	}
 
@@ -836,6 +863,7 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 	if err != nil {
 		b.intermittentErrorsSlidingWindow.Incr()
 		RecordBackendNetworkErrorRateSlidingWindow(b, b.ErrorRate())
+		metrics_tracer.RecordError(span, err)
 		return nil, wrapErr(err, "error reading response body")
 	}
 
@@ -854,6 +882,7 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 			if responseIsNotBatched(resB) {
 				b.intermittentErrorsSlidingWindow.Incr()
 				RecordBackendNetworkErrorRateSlidingWindow(b, b.ErrorRate())
+				metrics_tracer.RecordError(span, ErrBackendUnexpectedJSONRPC)
 				return nil, ErrBackendUnexpectedJSONRPC
 			}
 			b.intermittentErrorsSlidingWindow.Incr()
@@ -865,6 +894,7 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 	if len(rpcReqs) != len(rpcRes) {
 		b.intermittentErrorsSlidingWindow.Incr()
 		RecordBackendNetworkErrorRateSlidingWindow(b, b.ErrorRate())
+		metrics_tracer.RecordError(span, ErrBackendUnexpectedJSONRPC)
 		return nil, ErrBackendUnexpectedJSONRPC
 	}
 

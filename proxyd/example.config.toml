@@ -149,3 +149,16 @@ consensus_aware = true
 eth_call = "main"
 eth_chainId = "main"
 eth_blockNumber = "main"
+
+
+[opentelemtry_trace]
+# the trace is enabled or not
+enabled = false
+# the service name
+service_name = "xlayer-proxyd"
+# the environment
+environment = "test"
+# the trace report endpoint
+otel_endpoint = ""
+# the sample rate
+sample_rate = 0.6
