@@ -57,6 +57,14 @@ type MetricsConfig struct {
 	Port    int    `toml:"port"`
 }
 
+type OTelConfig struct {
+	Enabled        bool         `toml:"enabled"`
+	ServiceName    string       `toml:"service_name"`
+	MetricsURL     string       `toml:"metrics_url"`
+	Namespace      string       `toml:"namespace"`
+	ExportInterval TOMLDuration `toml:"export_interval"`
+}
+
 type RateLimitConfig struct {
 	UseRedis         bool                                `toml:"use_redis"`
 	BaseRate         int                                 `toml:"base_rate"`
@@ -231,6 +239,7 @@ type Config struct {
 	Cache                   CacheConfig             `toml:"cache"`
 	Redis                   RedisConfig             `toml:"redis"`
 	Metrics                 MetricsConfig           `toml:"metrics"`
+	OTel                    OTelConfig              `toml:"otel"`
 	RateLimit               RateLimitConfig         `toml:"rate_limit"`
 	Nacos                   NacosConfig             `toml:"nacos"`
 	BackendOptions          BackendOptions          `toml:"backend"`

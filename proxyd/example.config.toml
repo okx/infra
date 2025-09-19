@@ -11,7 +11,7 @@ ws_backend_group = "main"
 # Host for the proxyd RPC server to listen on.
 rpc_host = "0.0.0.0"
 # Port for the above.
-rpc_port = 8080
+rpc_port = 8088
 # Host for the proxyd WS server to listen on.
 ws_host = "0.0.0.0"
 # Port for the above
@@ -23,9 +23,9 @@ max_concurrent_rpcs = 1000
 # Server log level
 log_level = "info"
 
-[redis]
+#[redis]
 # URL to a Redis instance.
-url = "redis://localhost:6379"
+#url = "redis://localhost:6379"
 
 [metrics]
 # Whether or not to enable Prometheus metrics.
@@ -34,6 +34,23 @@ enabled = true
 host = "0.0.0.0"
 # Port for the above.
 port = 9761
+
+[otel]
+# Enable OpenTelemetry metrics client
+enabled = true
+# service_name defaults to "proxyd" if empty
+service_name = "proxyd"
+# OTLP metrics endpoint URL
+metrics_url = ""
+# Namespace for metrics (defaults to "proxyd" if empty)
+namespace = "proxyd"
+# Export interval for metrics (defaults to "5s" if empty)
+export_interval = "0.4s"
+
+# Common labels are read from environment variables:
+# MY_POD_IP - instance and host identifier (e.g., "10.36.111.14")
+# MY_SERVICE_NAME - job name (e.g., "okx-defi-xlayer-egseqx-pre")
+# OKONE_DEPLOY_VERSION - deployment version (e.g., "20250902080643033")
 
 [backend]
 # How long proxyd should wait for a backend response before timing out.
@@ -54,9 +71,12 @@ max_error_rate_threshold = 0.3
 [backends]
 # A map of backends by name.
 [backends.infura]
+consensus_skip_peer_count = true
+skip_is_syncing_check = true
+consensus_forced_candidate = true
 # The URL to contact the backend at. Will be read from the environment
 # if an environment variable prefixed with $ is provided.
-rpc_url = ""
+rpc_url = "http://127.0.0.1:8124"
 # The WS URL to contact the backend at. Will be read from the environment
 # if an environment variable prefixed with $ is provided.
 ws_url = ""
@@ -83,23 +103,23 @@ consensus_receipts_target = "eth_getBlockReceipts"
 # Allow backends safe and finalized block to drift backward up to the threshold.
 # Default is 0, meaning no drift is allowed e.g. newSafe >= oldSafe and newFinalized >= oldFinalized
 # Drift allows newSafe >= (oldSafe - safe_block_drift_threshold) and newFinalized >= (oldFinalized - finalized_block_drift_threshold)
-# safe_block_drift_threshold = 0
-# finalized_block_drift_threshold = 0
+ safe_block_drift_threshold = 0
+ finalized_block_drift_threshold = 0
 
-[backends.alchemy]
-rpc_url = ""
-ws_url = ""
-username = ""
-password = ""
-max_rps = 3
-max_ws_conns = 1
-consensus_receipts_target = "alchemy_getTransactionReceipts"
+#[backends.alchemy]
+#rpc_url = ""
+#ws_url = ""
+#username = ""
+#password = ""
+#max_rps = 3
+#max_ws_conns = 1
+#consensus_receipts_target = "alchemy_getTransactionReceipts"
 
 [backend_groups]
 [backend_groups.main]
 backends = ["infura"]
 # Enable consensus awareness for backend group, making it act as a load balancer, default false
-# consensus_aware = true
+consensus_aware = true
 # Period in which the backend wont serve requests if banned, default 5m
 # consensus_ban_period = "1m"
 # Maximum delay for update the backend, default 30s
@@ -111,21 +131,21 @@ backends = ["infura"]
 # Minimum peer count, default 3
 # consensus_min_peer_count = 4
 
-[backend_groups.alchemy]
-backends = ["alchemy"]
+#[backend_groups.alchemy]
+#backends = ["alchemy"]
 
 # If the authentication group below is in the config,
 # proxyd will only accept authenticated requests.
-[authentication]
+#[authentication]
 # Mapping of auth key to alias. The alias is used to provide a human-
 # readable name for the auth key in monitoring. The auth key will be
 # read from the environment if an environment variable prefixed with $
 # is provided. Note that you will need to quote the environment variable
 # in order for it to be value TOML, e.g. "$FOO_AUTH_KEY" = "foo_alias".
-secret = "test"
+#secret = "test"
 
 # Mapping of methods to backend groups.
 [rpc_method_mappings]
 eth_call = "main"
 eth_chainId = "main"
-eth_blockNumber = "alchemy"
+eth_blockNumber = "main"
