@@ -513,7 +513,7 @@ func (s *Server) handleBatchRPC(span trace.Span, ctx context.Context, reqs []jso
 	ids := make(map[string]int, len(reqs))
 
 	methodList := make([]string, len(reqs))
-	errs := make([]error, 0, len(reqs))
+	errs := make([]error, len(reqs))
 
 	for i := range reqs {
 		parsedReq, err := ParseRPCReq(reqs[i])
