@@ -989,8 +989,6 @@ func (bg *BackendGroup) Forward(ctx context.Context, rpcReqs []*RPCReq, isBatch 
 		return nil, "", nil
 	}
 
-	backends := bg.orderedBackendsForRequest()
-
 	overriddenResponses := make([]*indexedReqRes, 0)
 	rewrittenReqs := make([]*RPCReq, 0, len(rpcReqs))
 
@@ -1000,6 +998,9 @@ func (bg *BackendGroup) Forward(ctx context.Context, rpcReqs []*RPCReq, isBatch 
 	if bg.Consensus != nil {
 		rpcReqs, overriddenResponses = bg.OverwriteConsensusResponses(rpcReqs, overriddenResponses, rewrittenReqs)
 	}
+
+	// Choose backends to forward the request to, after rewriting the requests
+	backends := bg.orderedBackendsForRequest()
 
 	rpcRequestsTotal.Inc()
 
