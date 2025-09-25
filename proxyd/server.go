@@ -287,7 +287,7 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel = context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	ctx, span := metrics_trace.RecordSingleSpanWithoutFilter(s.tracer, ctx, "HandleRPC")
+	ctx, span := metrics_trace.RecordSingleSpan(s.tracer, ctx, "HandleRPC")
 	defer metrics_trace.CloseSpan(span)
 
 	origin := r.Header.Get("Origin")

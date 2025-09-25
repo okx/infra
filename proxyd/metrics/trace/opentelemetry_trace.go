@@ -22,23 +22,22 @@ import (
 // the global traceConfig
 var GlobalTraceConfig *TraceConfig
 
+var GlobalTracer trace.Tracer = otel.Tracer("GlobalTracer")
+
 type TraceConfig struct {
-	Enabled            bool                `toml:"enabled"`
-	ServiceName        string              `toml:"service_name"`
-	Environment        string              `toml:"environment"`
-	OTELEndpoint       string              `toml:"otel_endpoint"`
-	SampleRate         float64             `toml:"sample_rate"`
-	MethodWhiteListStr string              `toml:"trace_methods_whitelist"` // define the method need to be traced
-	ServiceVersion     string              `toml:"-"`                       // ignore, this field is determined in runtime
-	MethodWhiteList    map[string]struct{} `toml:"-"`                       // ignore, this field is determined by MethodWhiteListStr
+	Enabled        bool    `toml:"enabled"`
+	ServiceName    string  `toml:"service_name"`
+	Environment    string  `toml:"environment"`
+	OTELEndpoint   string  `toml:"otel_endpoint"`
+	SampleRate     float64 `toml:"sample_rate"`
+	ServiceVersion string  `toml:"-"` // ignore, this field is determined in runtime
 }
 
 var DefaultTraceConfig = TraceConfig{
-	Enabled:            false,
-	ServiceName:        "xlayer",
-	Environment:        "PROD",
-	SampleRate:         0.1,
-	MethodWhiteListStr: DefaultMethodsWhiteListToTrace,
+	Enabled:     false,
+	ServiceName: "xlayer",
+	Environment: "PROD",
+	SampleRate:  0.1,
 }
 
 func NewTraceConfig(v string) TraceConfig {
@@ -47,22 +46,17 @@ func NewTraceConfig(v string) TraceConfig {
 	return ret
 }
 
-func InitTraceConfig(traceConfig *TraceConfig) {
-	traceConfig.MethodWhiteList = ParseMethodsWhiteListToTrace(traceConfig.MethodWhiteListStr)
-}
-
 // init the opentelemetry trace
 func InitTracer(cfg *TraceConfig) (*sdktrace.TracerProvider, error) {
 	if !cfg.Enabled {
 		log.Info("Skip InitTracer for disabled")
 		return nil, nil
 	}
-	logger.Info("Begin InitTracer",
-		"url", cfg.OTELEndpoint,
-		"serviceName", cfg.ServiceName, "serviceVersion",
-		cfg.ServiceVersion, "environment", cfg.Environment,
-		"sampleRate", cfg.SampleRate,
-		"methodWhiteList", cfg.MethodWhiteList)
+	logger.Info("Begin InitTracer ",
+		" url: ", cfg.OTELEndpoint,
+		" serviceName:", cfg.ServiceName, " serviceVersion: ",
+		cfg.ServiceVersion, " environment: ", cfg.Environment,
+		" sampleRate:", cfg.SampleRate)
 
 	ctx := context.Background()
 
@@ -109,11 +103,11 @@ func InitTracer(cfg *TraceConfig) (*sdktrace.TracerProvider, error) {
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	))
-	logger.Info("InitTracer Success",
-		"url", cfg.OTELEndpoint,
-		"serviceName", cfg.ServiceName, "serviceVersion",
-		cfg.ServiceVersion, "environment", cfg.Environment,
-		"sampleRate", cfg.SampleRate)
+	logger.Info("InitTracer Success ",
+		"url:", cfg.OTELEndpoint,
+		" serviceName: ", cfg.ServiceName, " serviceVersion: ",
+		cfg.ServiceVersion, " environment: ", cfg.Environment,
+		"sampleRate: ", cfg.SampleRate)
 	return tp, nil
 }
 
@@ -177,12 +171,8 @@ func SetSpanAttribute(span trace.Span, attrs ...attribute.KeyValue) {
 	span.SetAttributes(attrs...)
 }
 
-func RecordSingleSpanWithoutFilter(tracer trace.Tracer, ctx context.Context, spanName string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
-	return recordSingleSpanImpl(tracer, ctx, "", false, spanName, attrs...)
-}
-
-func RecordSingleSpan(tracer trace.Tracer, ctx context.Context, method string, spanName string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
-	return recordSingleSpanImpl(tracer, ctx, method, true, spanName, attrs...)
+func RecordSingleSpan(tracer trace.Tracer, ctx context.Context, spanName string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	return recordSingleSpanImpl(tracer, ctx, spanName, attrs...)
 }
 
 func CloseSpan(span trace.Span) {
@@ -192,7 +182,7 @@ func CloseSpan(span trace.Span) {
 	span.End()
 }
 
-func recordSingleSpanImpl(tracer trace.Tracer, ctx context.Context, method string, filter bool, spanName string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+func recordSingleSpanImpl(tracer trace.Tracer, ctx context.Context, spanName string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
 	// the trace is not enabled
 	if tracer == nil || ctx == nil {
 		return ctx, nil
@@ -200,16 +190,10 @@ func recordSingleSpanImpl(tracer trace.Tracer, ctx context.Context, method strin
 	if !GlobalTraceConfig.Enabled {
 		return ctx, nil
 	}
-	// filter by the whitelist
-	if filter {
-		_, exists := GlobalTraceConfig.MethodWhiteList[AllowAll]
-		// check the method if not specified allowAll
-		if !exists {
-			_, exists := GlobalTraceConfig.MethodWhiteList[method]
-			if !exists {
-				return ctx, nil
-			}
-		}
+	enableTrace, ok := ctx.Value(EnableTraceKey).(bool)
+	// not enable the trace for specified case
+	if ok && !enableTrace {
+		return ctx, nil
 	}
 	// the trace is enabled
 	spanCtx, span := tracer.Start(ctx, spanName)

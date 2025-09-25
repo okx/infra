@@ -51,7 +51,6 @@ func main() {
 	if _, err := toml.DecodeFile(os.Args[1], config); err != nil {
 		log.Crit("error reading config file", "err", err)
 	}
-	trace.InitTraceConfig(&config.OpenTelemetryTrace)
 	trace.GlobalTraceConfig = &config.OpenTelemetryTrace
 
 	// update log level from config
@@ -140,7 +139,7 @@ func main() {
 		log.Error("Failed to initialize OpenTelemetry tracer", "err", err)
 		return
 	}
-	defer traceProvider.Shutdown(context.Background())
+	defer trace.Shutdown(traceProvider)
 
 	// non-blocking
 	_, shutdown, err := proxyd.Start(config)

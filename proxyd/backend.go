@@ -567,6 +567,9 @@ func (b *Backend) Override(opts ...BackendOpt) {
 }
 
 func (b *Backend) Forward(ctx context.Context, reqs []*RPCReq, isBatch bool) ([]*RPCRes, error) {
+	ctx, span := metrics_tracer.RecordSingleSpan(metrics_tracer.GlobalTracer, ctx, "Backend.Forward")
+	defer metrics_tracer.CloseSpan(span)
+
 	var lastError error
 	// <= to account for the first attempt not technically being
 	// a retry
@@ -675,8 +678,8 @@ func (b *Backend) ProxyWS(clientConn *websocket.Conn, methodWhitelist *StringSet
 	return NewWSProxier(b, clientConn, backendConn, methodWhitelist), nil
 }
 
-// ForwardRPC makes a call directly to a backend and populate the response into `res`
-func (b *Backend) ForwardRPC(ctx context.Context, res *RPCRes, id string, method string, params ...any) error {
+// ForwardRPCForPoller makes a call directly to a backend and populate the response into `res`
+func (b *Backend) ForwardRPCForPoller(ctx context.Context, res *RPCRes, id string, method string, params ...any) error {
 	jsonParams, err := json.Marshal(params)
 	if err != nil {
 		return err
@@ -688,7 +691,7 @@ func (b *Backend) ForwardRPC(ctx context.Context, res *RPCRes, id string, method
 		Params:  jsonParams,
 		ID:      []byte(id),
 	}
-
+	ctx = context.WithValue(ctx, metrics_tracer.EnableTraceKey, false)
 	slicedRes, err := b.doForward(ctx, []*RPCReq{&rpcReq}, false)
 	if err != nil {
 		return err
@@ -706,8 +709,8 @@ func (b *Backend) ForwardRPC(ctx context.Context, res *RPCRes, id string, method
 }
 
 func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool) ([]*RPCRes, error) {
-	ctx, span := metrics_tracer.RecordSingleSpanWithoutFilter(b.tracer, ctx,
-		"doForward", attribute.Int("batchSize", len(rpcReqs)))
+	ctx, span := metrics_tracer.RecordSingleSpan(b.tracer, ctx,
+		"Backend.doForward", attribute.Int("batchSize", len(rpcReqs)))
 	defer metrics_tracer.CloseSpan(span)
 
 	methodList := make([]string, len(rpcReqs))
@@ -727,6 +730,7 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 	if isBatch {
 		for _, rpcReq := range rpcReqs {
 			if rpcReq.Method == ConsensusGetReceiptsMethod {
+				metrics_tracer.RecordError(span, ErrConsensusGetReceiptsCantBeBatched)
 				return nil, ErrConsensusGetReceiptsCantBeBatched
 			}
 		}
@@ -858,6 +862,7 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 	defer httpRes.Body.Close()
 	resB, err := io.ReadAll(LimitReader(httpRes.Body, b.maxResponseSize))
 	if errors.Is(err, ErrLimitReaderOverLimit) {
+		metrics_tracer.RecordError(span, ErrBackendResponseTooLarge)
 		return nil, ErrBackendResponseTooLarge
 	}
 	if err != nil {
@@ -871,6 +876,7 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 	if isSingleElementBatch {
 		var singleRes RPCRes
 		if err := json.Unmarshal(resB, &singleRes); err != nil {
+			metrics_tracer.RecordError(span, ErrBackendBadResponse)
 			return nil, ErrBackendBadResponse
 		}
 		rpcRes = []*RPCRes{
@@ -887,6 +893,7 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 			}
 			b.intermittentErrorsSlidingWindow.Incr()
 			RecordBackendNetworkErrorRateSlidingWindow(b, b.ErrorRate())
+			metrics_tracer.RecordError(span, err)
 			return nil, ErrBackendBadResponse
 		}
 	}
@@ -986,6 +993,7 @@ type BackendGroup struct {
 	FallbackBackends       map[string]bool
 	routingStrategy        RoutingStrategy
 	multicallRPCErrorCheck bool
+	tracer                 trace.Tracer
 }
 
 func (bg *BackendGroup) GetRoutingStrategy() RoutingStrategy {
@@ -1015,6 +1023,9 @@ func (bg *BackendGroup) Primaries() []*Backend {
 
 // NOTE: BackendGroup Forward contains the log for balancing with consensus aware
 func (bg *BackendGroup) Forward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool) ([]*RPCRes, string, error) {
+	ctx, span := metrics_tracer.RecordSingleSpan(metrics_tracer.GlobalTracer, ctx, "BackendGroup.Forward")
+	defer metrics_tracer.CloseSpan(span)
+
 	if len(rpcReqs) == 0 {
 		return nil, "", nil
 	}
@@ -1648,6 +1659,9 @@ func (bg *BackendGroup) ForwardRequestToBackendGroup(
 	ctx context.Context,
 	isBatch bool,
 ) *BackendGroupRPCResponse {
+	ctx, span := metrics_tracer.RecordSingleSpan(metrics_tracer.GlobalTracer, ctx, "ForwardRequestToBackendGroup")
+	defer metrics_tracer.CloseSpan(span)
+
 	for _, back := range backends {
 		res := make([]*RPCRes, 0)
 		var err error
