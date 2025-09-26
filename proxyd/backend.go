@@ -709,6 +709,7 @@ func (b *Backend) ForwardRPCForPoller(ctx context.Context, res *RPCRes, id strin
 }
 
 func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool) ([]*RPCRes, error) {
+	tmpT := time.Now()
 	ctx, span := metrics_tracer.RecordSingleSpan(b.tracer, ctx,
 		"Backend.doForward", attribute.Int("batchSize", len(rpcReqs)))
 	defer metrics_tracer.CloseSpan(span)
@@ -827,6 +828,7 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 
 	start := time.Now()
 	httpRes, err := b.client.DoLimited(httpReq)
+	metrics_tracer.SetSpanAttribute(span, attribute.Int64("prepareHttpReqT", time.Since(tmpT).Milliseconds()))
 	if err != nil {
 		if !(errors.Is(err, context.Canceled) || errors.Is(err, ErrTooManyRequests)) {
 			b.intermittentErrorsSlidingWindow.Incr()
@@ -927,8 +929,9 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 			}
 		}
 	}
-
+	tmpT = time.Now()
 	sortBatchRPCResponse(rpcReqs, rpcRes)
+	metrics_tracer.SetSpanAttribute(span, attribute.Int64("sortBatchRPCResponseT", time.Since(tmpT).Milliseconds()))
 
 	return rpcRes, nil
 }
@@ -1036,13 +1039,20 @@ func (bg *BackendGroup) Forward(ctx context.Context, rpcReqs []*RPCReq, isBatch 
 	// When routing_strategy is set to `consensus_aware` the backend group acts as a load balancer
 	// serving traffic from any backend that agrees in the consensus group
 	// We also rewrite block tags to enforce compliance with consensus
+	tmpT := time.Now()
 	if bg.Consensus != nil {
 		rpcReqs, overriddenResponses = bg.OverwriteConsensusResponses(rpcReqs, overriddenResponses, rewrittenReqs)
 	}
+	OverwriteConsensusResponsesT := time.Since(tmpT)
 
+	tmpT = time.Now()
 	// Choose backends to forward the request to, after rewriting the requests
 	backends := bg.orderedBackendsForRequest()
+	orderedBackendsForRequestT := time.Since(tmpT)
 
+	metrics_tracer.SetSpanAttribute(span,
+		attribute.Int64("OverwriteConsensusResponsesT", OverwriteConsensusResponsesT.Milliseconds()),
+		attribute.Int64("orderedBackendsForRequestT", orderedBackendsForRequestT.Milliseconds()))
 	rpcRequestsTotal.Inc()
 
 	// When routing_strategy is set to 'multicall' the request will be forward to all backends
@@ -1074,7 +1084,11 @@ func (bg *BackendGroup) Forward(ctx context.Context, rpcReqs []*RPCReq, isBatch 
 		"req_id", GetReqID(ctx),
 		"auth", GetAuthCtx(ctx),
 	)
+	tmpT = time.Now()
 	res := OverrideResponses(backendResp.RPCRes, overriddenResponses)
+	OverrideResponsesT := time.Since(tmpT)
+	metrics_tracer.SetSpanAttribute(span,
+		attribute.Int64("OverrideResponsesT", OverrideResponsesT.Milliseconds()))
 	return res, backendResp.ServedBy, backendResp.error
 }
 
@@ -1581,10 +1595,14 @@ type LimitedHTTPClient struct {
 }
 
 func (c *LimitedHTTPClient) DoLimited(req *http.Request) (*http.Response, error) {
+	_, span := metrics_tracer.RecordSingleSpan(metrics_tracer.GlobalTracer, req.Context(),
+		"LimitedHTTPClient.DoLimited")
+	defer metrics_tracer.CloseSpan(span)
+
 	if c.sem == nil {
 		return c.Do(req)
 	}
-
+	startT := time.Now()
 	if err := c.sem.Acquire(req.Context(), 1); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil, ErrContextCanceled
@@ -1593,6 +1611,7 @@ func (c *LimitedHTTPClient) DoLimited(req *http.Request) (*http.Response, error)
 		return nil, wrapErr(err, ErrTooManyRequests.Message)
 	}
 	defer c.sem.Release(1)
+	metrics_tracer.SetSpanAttribute(span, attribute.Int64("acquireLimitT", time.Since(startT).Milliseconds()))
 	return c.Do(req)
 }
 
