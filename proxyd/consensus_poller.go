@@ -713,6 +713,9 @@ func (cp *ConsensusPoller) fetchBlock(ctx context.Context, be *Backend, block st
 	if !ok {
 		return 0, "", fmt.Errorf("unexpected response to eth_getBlockByNumber on backend %s", be.Name)
 	}
+	if jsonMap["number"] == nil || jsonMap["hash"] == nil {
+		return 0, "", fmt.Errorf("unexpected response to eth_getBlockByNumber on backend %s result %v", be.Name, rpcRes.Result)
+	}
 	blockNumber = hexutil.Uint64(hexutil.MustDecodeUint64(jsonMap["number"].(string)))
 	blockHash = jsonMap["hash"].(string)
 
