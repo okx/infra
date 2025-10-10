@@ -621,6 +621,7 @@ func TestRewriteRequest(t *testing.T) {
 	tests = generalize(tests, "eth_getBlockByNumber", "eth_getTransactionByBlockNumberAndIndex")
 	tests = generalize(tests, "eth_getBlockByNumber", "eth_getUncleByBlockNumberAndIndex")
 	tests = generalize(tests, "eth_getStorageSlotAt", "eth_getProof")
+	tests = generalize(tests, "debug_getRawReceipts", "eth_getBlockReceipts")
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

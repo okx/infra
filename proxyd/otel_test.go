@@ -11,7 +11,7 @@ import (
 )
 
 func TestMetricsClient(t *testing.T) {
-	client, err := NewMetricsClient(context.Background(), "fullnode-test-service", "")
+	client, err := NewMetricsClient(context.Background(), "fullnode-test-service", "", "proxyd", []attribute.KeyValue{}, 5*time.Second)
 	assert.NoError(t, err)
 	defer client.Close(context.Background())
 	t.Run("Counter", func(t *testing.T) {
