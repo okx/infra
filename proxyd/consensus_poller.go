@@ -574,7 +574,13 @@ func (cp *ConsensusPoller) UpdateBackendGroupConsensus(ctx context.Context) {
 			for result := range resultChan {
 				if result.err != nil {
 					log.Warn("error updating backend", "name", result.be.Name, "err", result.err)
-					continue
+					// Check if it's a BlockMissingFieldsError, if so, set allAgreed=false and break
+					if _, isBlockMissingFieldsError := result.err.(*BlockMissingFieldsError); isBlockMissingFieldsError {
+						allAgreed = false
+						break
+					} else {
+						continue
+					}
 				}
 				if proposedBlockHash == "" {
 					proposedBlockHash = result.actualBlockHash
@@ -712,6 +718,18 @@ func (cp *ConsensusPoller) fetchBlock(ctx context.Context, be *Backend, block st
 	jsonMap, ok := rpcRes.Result.(map[string]interface{})
 	if !ok {
 		return 0, "", fmt.Errorf("unexpected response to eth_getBlockByNumber on backend %s", be.Name)
+	}
+
+	// Check for missing required fields
+	var missingFields []string
+	if jsonMap["number"] == nil {
+		missingFields = append(missingFields, "number")
+	}
+	if jsonMap["hash"] == nil {
+		missingFields = append(missingFields, "hash")
+	}
+	if len(missingFields) > 0 {
+		return 0, "", NewBlockMissingFieldsError(be.Name, rpcRes.Result, missingFields)
 	}
 	blockNumber = hexutil.Uint64(hexutil.MustDecodeUint64(jsonMap["number"].(string)))
 	blockHash = jsonMap["hash"].(string)
