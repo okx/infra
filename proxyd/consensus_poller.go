@@ -710,7 +710,7 @@ func (cp *ConsensusPoller) Reset() {
 // fetchBlock is a convenient wrapper to make a request to get a block directly from the backend
 func (cp *ConsensusPoller) fetchBlock(ctx context.Context, be *Backend, block string) (blockNumber hexutil.Uint64, blockHash string, err error) {
 	var rpcRes RPCRes
-	err = be.ForwardRPC(ctx, &rpcRes, "67", "eth_getBlockByNumber", block, false)
+	err = be.ForwardRPCForPoller(ctx, &rpcRes, "67", "eth_getBlockByNumber", block, false)
 	if err != nil {
 		return 0, "", err
 	}
@@ -740,7 +740,7 @@ func (cp *ConsensusPoller) fetchBlock(ctx context.Context, be *Backend, block st
 // getPeerCount is a convenient wrapper to retrieve the current peer count from the backend
 func (cp *ConsensusPoller) getPeerCount(ctx context.Context, be *Backend) (count uint64, err error) {
 	var rpcRes RPCRes
-	err = be.ForwardRPC(ctx, &rpcRes, "67", "net_peerCount")
+	err = be.ForwardRPCForPoller(ctx, &rpcRes, "67", "net_peerCount")
 	if err != nil {
 		return 0, err
 	}
@@ -758,7 +758,7 @@ func (cp *ConsensusPoller) getPeerCount(ctx context.Context, be *Backend) (count
 // isInSync is a convenient wrapper to check if the backend is in sync from the network
 func (cp *ConsensusPoller) isInSync(ctx context.Context, be *Backend) (result bool, err error) {
 	var rpcRes RPCRes
-	err = be.ForwardRPC(ctx, &rpcRes, "67", "eth_syncing")
+	err = be.ForwardRPCForPoller(ctx, &rpcRes, "67", "eth_syncing")
 	if err != nil {
 		return false, err
 	}

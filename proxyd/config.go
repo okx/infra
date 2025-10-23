@@ -2,6 +2,7 @@ package proxyd
 
 import (
 	"fmt"
+	"github.com/ethereum-optimism/infra/proxyd/metrics/trace"
 	"math/big"
 	"os"
 	"strings"
@@ -252,6 +253,7 @@ type Config struct {
 	WhitelistErrorMessage   string                  `toml:"whitelist_error_message"`
 	SenderRateLimit         SenderRateLimitConfig   `toml:"sender_rate_limit"`
 	InteropValidationConfig InteropValidationConfig `toml:"interop_validation"`
+	OpenTelemetryTrace      trace.TraceConfig       `toml:"opentelemtry_trace"` // the openTelemtry config
 }
 
 type InteropValidationConfig struct {
