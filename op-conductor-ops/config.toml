@@ -1,0 +1,42 @@
+# Path to the SSL/TLS certificate file
+# cert_path = "./cacert.pem"
+
+# Network configurations
+[networks]
+
+# Network configuration
+[networks.op-network]
+sequencers = [
+    "conductor-1",
+    "conductor-2",
+    "conductor-3",
+    "conductor-4",
+]
+
+# Sequencer configurations
+[sequencers]
+
+# Sequencer configuration for op-network with three sequencers
+[sequencers.conductor-1]
+raft_addr = "op-conductor:50050"
+conductor_rpc_url = "http://localhost:8547"
+node_rpc_url = "http://localhost:9545"
+voting = true
+
+[sequencers.conductor-2]
+raft_addr = "op-conductor2:50050"
+conductor_rpc_url = "http://localhost:8548"
+node_rpc_url = "http://localhost:9546"
+voting = true
+
+[sequencers.conductor-3]
+raft_addr = "op-conductor3:50050"
+conductor_rpc_url = "http://localhost:8549"
+node_rpc_url = "http://localhost:9547"
+voting = false
+
+[sequencers.conductor-4]
+raft_addr = "op-conductor4:50050"
+conductor_rpc_url = "http://localhost:8550"
+node_rpc_url = "http://localhost:9548"
+voting = true
