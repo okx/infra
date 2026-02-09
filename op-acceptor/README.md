@@ -59,6 +59,64 @@ DEVNET_ENV_URL=kt://isthmus-devnet op-acceptor \
     --log.level INFO
 ```
 
+## Excluding tests via skip gates
+You can exclude tests that belong to one or more gates from every run. Excluded gates act as a global blacklist across all selection modes (gate and gateless). Any test/package listed in excluded gates will not run, even if included elsewhere or discovered via filesystem.
+
+- **Flag**: `--exclude-gates` (comma-separated gate IDs). Default: no exclusions. If a selected `--gate` is also listed in `--exclude-gates`, an error is returned.
+- **Env var**: `ACCEPTOR_EXCLUDE_GATES` overrides the flag if set. Set to an empty string to disable all exclusions.
+- **Gateless note**: exclusions are applied using the provided validators YAML; package-only entries blacklist by import-path prefix segment match.
+
+Examples:
+
+```bash
+# No default exclusions; to exclude, specify one or more gates
+op-acceptor --validators acceptance-tests.yaml --gate base --exclude-gates "flake-shake"
+
+# Exclude multiple gates
+op-acceptor --validators acceptance-tests.yaml --gate base --exclude-gates "flake-shake,experimental"
+
+# Using env var to override
+ACCEPTOR_EXCLUDE_GATES=experimental op-acceptor --validators acceptance-tests.yaml --gate base
+```
+
+## Flake‑Shake (stability analysis)
+
+Analyze test stability by running tests multiple times and aggregating results.
+
+### Usage
+
+Gate-based (with validators):
+
+```bash
+op-acceptor \
+  --validators acceptance-tests.yaml \
+  --gate flake-shake \
+  --flake-shake \
+  --flake-shake-iterations 100 \
+  --orchestrator sysgo
+```
+
+Gateless (directory-based):
+
+```bash
+op-acceptor \
+  --testdir ./path/to/tests/... \
+  --flake-shake \
+  --flake-shake-iterations 10 \
+  --orchestrator sysgo
+```
+
+### Output
+
+- Per run, two reports are generated under the run directory `logs/testrun-<runID>/`:
+  - `flake-shake-report.json` (machine-readable)
+  - `flake-shake-report.html` (human-readable)
+- The final console line includes `flake_report_html` and `flake_report_json` fields with absolute paths.
+
+Tests are classified as:
+- **STABLE**: 100% pass rate across all iterations
+- **UNSTABLE**: any failure (<100% pass rate)
+
 ## Concepts
 
 ### Test Discovery
@@ -92,7 +150,6 @@ Benefits of using op-acceptor over plain `go test`:
 - Integration with devstack orchestrators
 
 ## Contributing
-
 Please note that this project is under active development and the API may evolve. We welcome all contributions and appreciate your interest in improving op-acceptor!
 
 ### Adding a new test/suite/gate
@@ -143,11 +200,29 @@ If a package is provided and no name is provided, op-acceptor runs all tests in 
 - package: github.com/ethereum-optimism/optimism/kurtosis-devnet/tests/interop
 ```
 
+#### Package path semantics (sub-packages)
+
+When you specify a `package` in a gate, op-acceptor passes it directly to `go test`. This means:
+
+- A plain package path (e.g., `./pkg`) runs tests in that package only.
+- To include sub-packages, use Go's glob notation with `...` (e.g., `./pkg/...`).
+
+Examples:
+
+```yaml
+# Only runs tests in ./parent (not sub-packages)
+tests:
+  - package: ./parent
+
+# Runs tests in ./parent and all nested sub-packages
+tests:
+  - package: ./parent/...
+```
+
 ## Development
 
 ### Prerequisites
-* [Go](https://go.dev/dl/) 1.22+
-* [Just](https://just.systems/)
+This project uses [mise](https://mise.jdx.dev/) to manage tool versions, ensuring consistency between local development and CI environments.
 
 ### Getting Started
 Build the binary:
@@ -290,7 +365,7 @@ git tag -l --sort=-v:refname | grep op-acceptor
 
 # Set you target version (increase the latest appropriately)
 # and add a useful summary
-VERSION=v0.1.6
+VERSION=v3.1.6
 SUMMARY="Some useful summary of changes"
 
 # Tag your release

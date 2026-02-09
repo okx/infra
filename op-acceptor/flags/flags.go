@@ -121,6 +121,18 @@ var (
 		EnvVars: opservice.PrefixEnvVar(EnvVarPrefix, "OUTPUT_REALTIME_LOGS"),
 		Usage:   "If enabled, test logs will be outputted to the console in realtime. Defaults to false.",
 	}
+	ShowProgress = &cli.BoolFlag{
+		Name:    "show-progress",
+		Value:   false,
+		EnvVars: opservice.PrefixEnvVar(EnvVarPrefix, "SHOW_PROGRESS"),
+		Usage:   "Show periodic progress updates during test execution. Defaults to false.",
+	}
+	ProgressInterval = &cli.DurationFlag{
+		Name:    "progress-interval",
+		Value:   30 * time.Second,
+		EnvVars: opservice.PrefixEnvVar(EnvVarPrefix, "PROGRESS_INTERVAL"),
+		Usage:   "Interval between progress updates when --show-progress is enabled. Defaults to 30s.",
+	}
 	Orchestrator = &cli.StringFlag{
 		Name:    "orchestrator",
 		Value:   OrchestratorSysext.String(),
@@ -149,6 +161,24 @@ var (
 		EnvVars: opservice.PrefixEnvVar(EnvVarPrefix, "CONCURRENCY"),
 		Usage:   "Number of concurrent test workers. 0 (default) auto-determines based on system capabilities.",
 	}
+	FlakeShake = &cli.BoolFlag{
+		Name:    "flake-shake",
+		Value:   false,
+		EnvVars: opservice.PrefixEnvVar(EnvVarPrefix, "FLAKE_SHAKE"),
+		Usage:   "Enable flake-shake mode to run tests multiple times for stability validation.",
+	}
+	FlakeShakeIterations = &cli.IntFlag{
+		Name:    "flake-shake-iterations",
+		Value:   100,
+		EnvVars: opservice.PrefixEnvVar(EnvVarPrefix, "FLAKE_SHAKE_ITERATIONS"),
+		Usage:   "Number of times to run each test in flake-shake mode. Defaults to 100.",
+	}
+	ExcludeGates = &cli.StringFlag{
+		Name:    "exclude-gates",
+		Value:   "",
+		EnvVars: opservice.PrefixEnvVar(EnvVarPrefix, "EXCLUDE_GATES"),
+		Usage:   "Comma-separated list of gate IDs to blacklist globally across all modes.",
+	}
 )
 
 var requiredFlags = []cli.Flag{
@@ -166,10 +196,15 @@ var optionalFlags = []cli.Flag{
 	LogDir,
 	TestLogLevel,
 	OutputRealtimeLogs,
+	ShowProgress,
+	ProgressInterval,
 	Orchestrator,
 	DevnetEnvURL,
 	Serial,
 	Concurrency,
+	FlakeShake,
+	FlakeShakeIterations,
+	ExcludeGates,
 }
 var Flags []cli.Flag
 

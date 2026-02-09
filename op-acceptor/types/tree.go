@@ -69,6 +69,9 @@ type TestTree struct {
 	Timestamp   time.Time     // When the run started
 	NetworkName string        // Network name
 
+	// Effective configuration snapshot for this run (optional)
+	Config *EffectiveConfigSnapshot `json:"config,omitempty"`
+
 	// Flat indices for quick lookup
 	AllNodes    []*TestTreeNode // All nodes in execution order
 	TestNodes   []*TestTreeNode // Only test/subtest nodes (no containers)
@@ -98,12 +101,6 @@ func NewTestTreeBuilder() *TestTreeBuilder {
 // WithSubtests controls whether subtests are included in the tree
 func (b *TestTreeBuilder) WithSubtests(show bool) *TestTreeBuilder {
 	b.showSubtests = show
-	return b
-}
-
-// WithCollapsedPackages controls whether package nodes start collapsed
-func (b *TestTreeBuilder) WithCollapsedPackages(collapsed bool) *TestTreeBuilder {
-	b.collapsePackages = collapsed
 	return b
 }
 
@@ -345,6 +342,7 @@ func (b *TestTreeBuilder) createTestNode(result *TestResult, parent *TestTreeNod
 
 // createSubtestNode creates a subtest node from a TestResult
 func (b *TestTreeBuilder) createSubtestNode(result *TestResult, parent *TestTreeNode, order int) *TestTreeNode {
+
 	return &TestTreeNode{
 		ID:             fmt.Sprintf("subtest-%d", order),
 		Name:           result.Metadata.FuncName,
@@ -407,7 +405,7 @@ func (b *TestTreeBuilder) calculateNodeStats(node *TestTreeNode) TestTreeStats {
 	// If this is a test/subtest node, count it
 	// For package tests with subtests, we only count the subtests
 	if (node.Type == NodeTypeTest || node.Type == NodeTypeSubtest) &&
-		!(node.Type == NodeTypeTest && node.TestResult != nil && node.TestResult.Metadata.RunAll && len(node.Children) > 0) {
+		(node.Type != NodeTypeTest || node.TestResult == nil || !node.TestResult.Metadata.RunAll || len(node.Children) == 0) {
 		stats.Total = 1
 		switch node.Status {
 		case TestStatusPass:

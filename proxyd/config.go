@@ -31,6 +31,8 @@ type ServerConfig struct {
 	EnablePprof           bool `toml:"enable_pprof"`
 	EnableXServedByHeader bool `toml:"enable_served_by_header"`
 	AllowAllOrigins       bool `toml:"allow_all_origins"`
+	PublicAccess          bool `toml:"public_access"`
+	EnableTxHashLogging   bool `toml:"enable_tx_hash_logging"`
 }
 
 type CacheConfig struct {
@@ -142,6 +144,7 @@ type BackendConfig struct {
 	ConsensusSkipPeerCountCheck bool   `toml:"consensus_skip_peer_count"`
 	ConsensusForcedCandidate    bool   `toml:"consensus_forced_candidate"`
 	ConsensusReceiptsTarget     string `toml:"consensus_receipts_target"`
+	AllowedStatusCodes          []int  `toml:"allowed_status_codes"`
 }
 
 type BackendsConfig map[string]*BackendConfig
@@ -205,6 +208,9 @@ type BackendGroupConfig struct {
 	ConsensusMaxBlockLag        int64        `toml:"consensus_max_block_lag"`
 	ConsensusMaxBlockRange      uint64       `toml:"consensus_max_block_range"`
 	ConsensusMinPeerCount       int          `toml:"consensus_min_peer_count"`
+	// Will set Max Block Range for non-consensus eth_getLogs and eth_newFilter
+	// Will override consensus_max_block_range if consensus_max_block range is also set
+	MaxBlockRange uint64 `toml:"max_block_range"`
 
 	ConsensusHA                  bool         `toml:"consensus_ha"`
 	ConsensusHAHeartbeatInterval TOMLDuration `toml:"consensus_ha_heartbeat_interval"`

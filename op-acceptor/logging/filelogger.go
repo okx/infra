@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/acarl005/stripansi"
+
 	"github.com/ethereum-optimism/infra/op-acceptor/reporting"
 	"github.com/ethereum-optimism/infra/op-acceptor/types"
 	"github.com/ethereum-optimism/infra/op-acceptor/ui"
@@ -173,10 +175,10 @@ func NewFileLogger(baseDir string, runID string, networkName, gateRun string) (*
 	rawJSONSink := &RawJSONSink{logger: logger}
 	logger.sinks = append(logger.sinks, rawJSONSink)
 
-	// Load HTML template
-	templateContent, err := templateFS.ReadFile("templates/" + HTMLResultsTemplate)
+	// Load raw template content for ReportingHTMLSink
+	templateContent, err := GetRawTemplateContent(HTMLResultsTemplate)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read HTML template: %w", err)
+		return nil, fmt.Errorf("failed to load HTML template: %w", err)
 	}
 
 	// Load JavaScript content
@@ -434,33 +436,56 @@ func getReadableTestFilename(metadata types.ValidatorMetadata) string {
 	// Use the function name as the base
 	if metadata.FuncName != "" {
 		fileName = metadata.FuncName
+		// Clean up function names that start with "./"
+		fileName = strings.TrimPrefix(fileName, "./")
 	} else if metadata.RunAll {
 		// For package tests that run all tests, use package basename
 		if metadata.Package != "" {
-			packageParts := strings.Split(metadata.Package, "/")
-			// Find the last non-empty part
-			for i := len(packageParts) - 1; i >= 0; i-- {
-				if packageParts[i] != "" {
-					fileName = packageParts[i]
-					break
+			// Handle special case where package is "." (current directory)
+			if metadata.Package == "." {
+				// Use a generic name - will rarely happen in practice
+				fileName = "package"
+			} else {
+				packageParts := strings.Split(metadata.Package, "/")
+				// Find the last non-empty part
+				for i := len(packageParts) - 1; i >= 0; i-- {
+					if packageParts[i] != "" && packageParts[i] != "." {
+						fileName = packageParts[i]
+						break
+					}
 				}
-			}
-			// If we didn't find a package name, use a fallback
-			if fileName == "" {
-				fileName = "PackageSuite"
+				// If we didn't find a package name, use a fallback
+				if fileName == "" {
+					fileName = "PackageSuite"
+				}
 			}
 		} else {
 			fileName = "PackageSuite"
 		}
 	} else {
 		fileName = metadata.ID // Fallback to ID if no function name
+		// Clean up ID that starts with "./"
+		fileName = strings.TrimPrefix(fileName, "./")
 	}
 
 	// Extract package basename for cleaner filenames
 	pkgName := ""
 	if metadata.Package != "" {
-		// Handle GitHub-style package paths
-		if strings.Contains(metadata.Package, "github.com") {
+		// Handle special case where package is "." (current directory)
+		// or "./something" (subdirectory of current directory)
+		if metadata.Package == "." {
+			// Package "." is rare - usually packages are like "./base", "./isthmus", etc.
+			// Don't add a package prefix for "."
+			pkgName = ""
+		} else if strings.HasPrefix(metadata.Package, "./") {
+			// For packages like "./base", extract the directory name
+			pkgName = strings.TrimPrefix(metadata.Package, "./")
+			// If it contains further slashes, take the last part
+			if idx := strings.LastIndex(pkgName, "/"); idx != -1 {
+				pkgName = pkgName[idx+1:]
+			}
+		} else if strings.Contains(metadata.Package, "github.com") {
+			// Handle GitHub-style package paths
 			// For github.com/org/repo/pkg/subpkg -> extract the last part
 			parts := strings.Split(metadata.Package, "/")
 			if len(parts) > 0 {
@@ -499,25 +524,26 @@ func getReadableTestFilename(metadata types.ValidatorMetadata) string {
 		prefix = metadata.Suite
 	}
 
-	// Build the final filename with appropriate components
-	var nameBuilder strings.Builder
-
-	// Add prefix if it exists and doesn't duplicate the package name
-	if prefix != "" && prefix != pkgName {
-		nameBuilder.WriteString(prefix)
-		nameBuilder.WriteString("_")
+	// Build the final filename components then join with underscores to avoid stray separators
+	var components []string
+	if prefix != "" {
+		components = append(components, prefix)
 	}
-
-	// Add package name if it exists and doesn't duplicate the prefix or function name
-	if pkgName != "" && pkgName != prefix && pkgName != fileName {
-		nameBuilder.WriteString(pkgName)
-		nameBuilder.WriteString("_")
+	if pkgName != "" && pkgName != prefix {
+		components = append(components, pkgName)
 	}
-
-	nameBuilder.WriteString(fileName)
+	baseName := fileName
+	// Avoid duplicated package/file for package-level entries (no FuncName),
+	// regardless of temporary RunAll flag propagation timing
+	if metadata.FuncName == "" && pkgName != "" && pkgName == fileName {
+		baseName = ""
+	}
+	if baseName != "" {
+		components = append(components, baseName)
+	}
 
 	// Finally ensure the name is safe for a filename
-	return safeFilename(nameBuilder.String())
+	return safeFilename(strings.Join(components, "_"))
 }
 
 // Sink implementations
@@ -648,25 +674,52 @@ func (s *PerTestFileSink) Consume(result *types.TestResult, runID string) error 
 
 	// Create individual log files for each subtest
 	for subTestName, subTest := range result.SubTests {
-		// Create a copy of the subtest with proper metadata for filename generation
-		subTestResult := &types.TestResult{
-			Metadata: types.ValidatorMetadata{
-				ID:       subTest.Metadata.ID,
-				Gate:     result.Metadata.Gate,    // Use parent's gate
-				Suite:    result.Metadata.Suite,   // Use parent's suite
-				FuncName: subTestName,             // Use the subtest name
-				Package:  result.Metadata.Package, // Use parent's package
-				RunAll:   false,
-			},
-			Status:   subTest.Status,
-			Error:    subTest.Error,
-			Duration: subTest.Duration,
-			Stdout:   subTest.Stdout,
-		}
-
-		err = s.createTestLogFileOnce(subTestResult, passedDir, failedDir, runID)
-		if err != nil {
+		// Write this subtest and all nested subtests recursively, tracking full hierarchical name
+		if err := s.writeSubtestRecursive(result.Metadata, subTestName, subTest, passedDir, failedDir, runID); err != nil {
 			return fmt.Errorf("failed to create subtest log file for %s: %w", subTestName, err)
+		}
+	}
+
+	return nil
+}
+
+// writeSubtestRecursive writes log files for a subtest and all of its nested subtests
+func (s *PerTestFileSink) writeSubtestRecursive(parentMeta types.ValidatorMetadata, fullPath string, subTest *types.TestResult, passedDir, failedDir, runID string) error {
+	// Create a copy of the subtest with proper metadata for filename generation
+	subTestResult := &types.TestResult{
+		Metadata: types.ValidatorMetadata{
+			ID:       subTest.Metadata.ID,
+			Gate:     parentMeta.Gate,    // Use parent's gate
+			Suite:    parentMeta.Suite,   // Use parent's suite
+			FuncName: fullPath,           // Use the full subtest path name
+			Package:  parentMeta.Package, // Use parent's package
+			RunAll:   false,
+		},
+		Status:   subTest.Status,
+		Error:    subTest.Error,
+		Duration: subTest.Duration,
+		Stdout:   subTest.Stdout,
+		SubTests: subTest.SubTests,
+	}
+
+	// Compute and propagate the artifact basename to the original subTest as well
+	computedBase := getReadableTestFilename(subTestResult.Metadata)
+	subTest.ArtifactBaseName = computedBase
+
+	if err := s.createTestLogFileOnce(subTestResult, passedDir, failedDir, runID); err != nil {
+		return err
+	}
+
+	// Recurse into nested subtests, if any
+	for nestedName, nested := range subTest.SubTests {
+		nextPath := fullPath
+		if nextPath != "" {
+			nextPath += "/" + nestedName
+		} else {
+			nextPath = nestedName
+		}
+		if err := s.writeSubtestRecursive(parentMeta, nextPath, nested, passedDir, failedDir, runID); err != nil {
+			return err
 		}
 	}
 
@@ -686,8 +739,8 @@ func (s *PerTestFileSink) createTestLogFileOnce(result *types.TestResult, passed
 		targetDir = passedDir
 	}
 
-	// Full path to the test log file
-	testFilePath := filepath.Join(targetDir, filename+".log")
+	// Full path to the test log file (use .txt to be consistent with links)
+	testFilePath := filepath.Join(targetDir, filename+".txt")
 
 	// Check if we've already processed this test file
 	s.mu.Lock()
@@ -699,13 +752,18 @@ func (s *PerTestFileSink) createTestLogFileOnce(result *types.TestResult, passed
 	s.mu.Unlock()
 
 	// Now create the test log file
-	return s.createTestLogFile(result, passedDir, failedDir, runID)
+	return s.createTestLogFiles(result, passedDir, failedDir)
 }
 
-// createTestLogFile creates a log file for a single test result
-func (s *PerTestFileSink) createTestLogFile(result *types.TestResult, passedDir, failedDir string, runID string) error {
+// createTestLogFiles creates three separate log files for a single test result:
+// 1. A plaintext log file containing the processed plaintext output
+// 2. A JSON log file containing the raw JSON output
+// 3. A summary log file containing the result summary
+func (s *PerTestFileSink) createTestLogFiles(result *types.TestResult, passedDir, failedDir string) error {
 	// Generate a safe filename based on the test metadata
 	filename := getReadableTestFilename(result.Metadata)
+	// Persist the artifact basename on the result for downstream sinks
+	result.ArtifactBaseName = filename
 
 	// Determine which directory to use based on test status
 	var targetDir string
@@ -715,50 +773,64 @@ func (s *PerTestFileSink) createTestLogFile(result *types.TestResult, passedDir,
 		targetDir = passedDir
 	}
 
-	// Full path to the test log file
-	testFilePath := filepath.Join(targetDir, filename+".log")
-
-	// Get or create the async writer
-	writer, err := s.logger.getAsyncWriter(testFilePath)
-	if err != nil {
-		return err
-	}
+	// Create the three separate files
+	plaintextPath := filepath.Join(targetDir, filename+".txt")
+	jsonPath := filepath.Join(targetDir, filename+".json")
+	summaryPath := filepath.Join(targetDir, filename+".log")
 
 	// Check if this is a timeout failure for special handling
 	isTimeout := result.TimedOut
 
-	// Build error summary header
-	var content strings.Builder
+	// 1. Create the plaintext file
+	err := s.createPlaintextFile(result, plaintextPath, isTimeout)
+	if err != nil {
+		return fmt.Errorf("failed to create plaintext file: %w", err)
+	}
 
-	// Check if this is a timeout failure
-	if result.Status == types.TestStatusFail || result.Status == types.TestStatusError {
-		fmt.Fprintf(&content, "\n%s\n", strings.Repeat("-", 80))
-		if isTimeout {
-			fmt.Fprintf(&content, "TIMEOUT ERROR SUMMARY:\n")
-			fmt.Fprintf(&content, "======================\n\n")
-			fmt.Fprintf(&content, "This test failed due to timeout!\n")
-			fmt.Fprintf(&content, "Timeout Duration: %v\n", result.Metadata.Timeout)
-			fmt.Fprintf(&content, "Error: %s\n\n", result.Error.Error())
-		} else {
-			fmt.Fprintf(&content, "ERROR SUMMARY:\n")
-			fmt.Fprintf(&content, "=============\n\n")
+	// 2. Create the JSON file
+	err = s.createJSONFile(result, jsonPath, isTimeout)
+	if err != nil {
+		return fmt.Errorf("failed to create JSON file: %w", err)
+	}
+
+	// 3. Create the summary file
+	err = s.createSummaryFile(result, summaryPath, isTimeout)
+	if err != nil {
+		return fmt.Errorf("failed to create summary file: %w", err)
+	}
+
+	return nil
+}
+
+// createPlaintextFile creates the plaintext output file
+func (s *PerTestFileSink) createPlaintextFile(result *types.TestResult, filePath string, isTimeout bool) error {
+	// Get or create the async writer
+	writer, err := s.logger.getAsyncWriter(filePath)
+	if err != nil {
+		return err
+	}
+
+	// Extract the plaintext output from JSON
+	var plaintext strings.Builder
+	if result.Stdout != "" {
+		// First, try to parse as JSON (go test -json output)
+		parser := NewJSONOutputParser(result.Stdout)
+		parser.ProcessJSONOutput(func(_ map[string]interface{}, outputText string) {
+			// Strip ANSI escape sequences from the output
+			plaintext.WriteString(stripansi.Strip(outputText))
+		})
+
+		// If JSON parsing produced no output, the Stdout might already be plain text
+		// (e.g., for subtests extracted from a package run)
+		if plaintext.Len() == 0 && strings.Contains(result.Stdout, "===") {
+			// It's already plain text, strip ANSI sequences and use it
+			plaintext.WriteString(stripansi.Strip(result.Stdout))
 		}
 	}
 
-	// Extract the plaintext output first from all JSON Output fields
-	var plaintext strings.Builder
-	if result.Stdout != "" {
-		parser := NewJSONOutputParser(result.Stdout)
-		parser.ProcessJSONOutput(func(_ map[string]interface{}, outputText string) {
-			plaintext.WriteString(outputText)
-		})
-	}
+	var content strings.Builder
 
-	// 1. Write the plaintext output first, with timeout information if applicable
-	fmt.Fprintf(&content, "PLAINTEXT OUTPUT:\n")
-	fmt.Fprintf(&content, "================\n\n")
-
-	// For timeout cases, prominently display the timeout error at the beginning of plaintext output
+	// For timeout cases, prominently display the timeout error at the beginning
 	if isTimeout {
 		fmt.Fprintf(&content, "*** TIMEOUT ERROR ***\n")
 		fmt.Fprintf(&content, "%s\n", result.Error.Error())
@@ -774,39 +846,93 @@ func (s *PerTestFileSink) createTestLogFile(result *types.TestResult, passedDir,
 	} else {
 		// For non-timeout cases, show regular output
 		if plaintext.Len() > 0 {
-			fmt.Fprintf(&content, "%s\n", plaintext.String())
+			fmt.Fprintf(&content, "%s", plaintext.String())
 		} else {
-			fmt.Fprintf(&content, "No output captured.\n")
+			// Handle cases where no output was captured
+			// This should be rare after parser fixes, but can happen if:
+			// - A test genuinely produces no output (no t.Log, no assertions, etc.)
+			// - The test was skipped before any output
+			// - There was an error capturing output
+			if result.Metadata.FuncName != "" {
+				// Provide informative message about the test result
+				fmt.Fprintf(&content, "Test completed with status: %s\n", result.Status)
+				if result.Duration > 0 {
+					fmt.Fprintf(&content, "Duration: %v\n", result.Duration)
+				}
+				if result.Error != nil {
+					fmt.Fprintf(&content, "Error: %v\n", result.Error)
+				} else {
+					fmt.Fprintf(&content, "No output was produced by this test.\n")
+				}
+			} else {
+				// Package-level result with no output
+				fmt.Fprintf(&content, "No output captured.\n")
+			}
 		}
 	}
 
-	// 2. Add a clear separator between plaintext and JSON
-	fmt.Fprintf(&content, "\n%s\n", strings.Repeat("-", 80))
-	fmt.Fprintf(&content, "JSON OUTPUT:\n")
-	fmt.Fprintf(&content, "============\n\n")
+	// Write the content to the file
+	return writer.Write([]byte(content.String()))
+}
 
-	// 3. Include the raw JSON output for full debug information
+// createJSONFile creates the JSON output file
+func (s *PerTestFileSink) createJSONFile(result *types.TestResult, filePath string, isTimeout bool) error {
+	// Get or create the async writer
+	writer, err := s.logger.getAsyncWriter(filePath)
+	if err != nil {
+		return err
+	}
+
+	var content strings.Builder
+
+	// Include the raw JSON output
 	if result.Stdout != "" {
 		if isTimeout {
-			fmt.Fprintf(&content, "PARTIAL JSON OUTPUT (BEFORE TIMEOUT):\n")
-			fmt.Fprintf(&content, "-------------------------------------\n")
+			fmt.Fprintf(&content, "# PARTIAL JSON OUTPUT (BEFORE TIMEOUT)\n")
+			fmt.Fprintf(&content, "# ------------------------------------\n")
 		}
-		fmt.Fprintf(&content, "%s\n", result.Stdout)
+		fmt.Fprintf(&content, "%s", result.Stdout)
+		if !strings.HasSuffix(result.Stdout, "\n") {
+			fmt.Fprintf(&content, "\n")
+		}
 	} else if isTimeout {
-		fmt.Fprintf(&content, "No JSON output captured before timeout.\n")
+		fmt.Fprintf(&content, "# No JSON output captured before timeout.\n")
 		// Include our timeout marker if we stored one
-		fmt.Fprintf(&content, "\nTimeout marker that would be stored:\n")
+		fmt.Fprintf(&content, "# Timeout marker that would be stored:\n")
 		fmt.Fprintf(&content, `{"Time":"%s","Action":"timeout","Package":"%s","Test":"%s","Output":"TEST TIMED OUT - no JSON output captured\n"}`,
 			time.Now().Format(time.RFC3339), result.Metadata.Package, result.Metadata.FuncName)
 		fmt.Fprintf(&content, "\n")
 	} else {
-		fmt.Fprintf(&content, "No JSON output available.\n")
+		fmt.Fprintf(&content, "# No JSON output available.\n")
 	}
 
-	// 4. Add a separator before the error summary section
+	// Write the content to the file
+	return writer.Write([]byte(content.String()))
+}
+
+// createSummaryFile creates the summary file
+func (s *PerTestFileSink) createSummaryFile(result *types.TestResult, filePath string, isTimeout bool) error {
+	// Get or create the async writer
+	writer, err := s.logger.getAsyncWriter(filePath)
+	if err != nil {
+		return err
+	}
+
+	var content strings.Builder
+
+	// Check if this is a timeout failure
 	if result.Status == types.TestStatusFail || result.Status == types.TestStatusError {
-		// Extract critical error information from non-timeout errors
-		if !isTimeout {
+		if isTimeout {
+			fmt.Fprintf(&content, "TIMEOUT ERROR SUMMARY:\n")
+			fmt.Fprintf(&content, "======================\n\n")
+			fmt.Fprintf(&content, "This test failed due to timeout!\n")
+			fmt.Fprintf(&content, "Timeout Duration: %v\n", result.Metadata.Timeout)
+			fmt.Fprintf(&content, "Error: %s\n\n", result.Error.Error())
+		} else {
+			fmt.Fprintf(&content, "ERROR SUMMARY:\n")
+			fmt.Fprintf(&content, "=============\n\n")
+
+			// Extract critical error information from non-timeout errors
 			errorInfo := extractErrorData(result.Stdout)
 
 			if errorInfo.TestName != "" {
@@ -831,8 +957,7 @@ func (s *PerTestFileSink) createTestLogFile(result *types.TestResult, passedDir,
 			}
 		}
 	} else {
-		// For passed tests, a simpler summary at the end
-		fmt.Fprintf(&content, "\n%s\n", strings.Repeat("-", 80))
+		// For passed tests, a simpler summary
 		fmt.Fprintf(&content, "RESULT SUMMARY:\n")
 		fmt.Fprintf(&content, "===============\n\n")
 		fmt.Fprintf(&content, "Test passed: %s\n", result.Metadata.FuncName)
@@ -852,13 +977,6 @@ type JSONOutputParser struct {
 func NewJSONOutputParser(input string) *JSONOutputParser {
 	return &JSONOutputParser{
 		reader: strings.NewReader(input),
-	}
-}
-
-// NewJSONOutputParserFromReader creates a new JSON parser from an io.Reader
-func NewJSONOutputParserFromReader(reader io.Reader) *JSONOutputParser {
-	return &JSONOutputParser{
-		reader: reader,
 	}
 }
 
@@ -900,16 +1018,6 @@ func (p *JSONOutputParser) ProcessJSONOutput(handler func(jsonData map[string]in
 		// Call the handler with the JSON data and output text
 		handler(jsonData, outputText)
 	}
-}
-
-// GetOutputAsString extracts and concatenates all "Output" fields from JSON
-// and returns them as a single string
-func (p *JSONOutputParser) GetOutputAsString() string {
-	var outputBuilder strings.Builder
-	p.ProcessJSONOutput(func(_ map[string]interface{}, outputText string) {
-		outputBuilder.WriteString(outputText)
-	})
-	return outputBuilder.String()
 }
 
 // ErrorInfo holds extracted error information from test output
@@ -1007,12 +1115,6 @@ func (p *JSONOutputParser) GetErrorInfo() ErrorInfo {
 }
 
 // Helper functions for backward compatibility or convenience
-
-// extractPlainText returns all output text from JSON as a string
-func extractPlainText(input string) string {
-	parser := NewJSONOutputParser(input)
-	return parser.GetOutputAsString()
-}
 
 // extractErrorData extracts error information from JSON output
 func extractErrorData(input string) ErrorInfo {
