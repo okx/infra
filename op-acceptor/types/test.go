@@ -20,11 +20,15 @@ const (
 type TestResult struct {
 	Metadata ValidatorMetadata
 	Status   TestStatus
-	Error    error                  // Changed from string to error
+	Error    error                  // Error message for the test
 	Duration time.Duration          // Track test execution time
 	SubTests map[string]*TestResult // Store individual test results when running a package
 	Stdout   string                 // Capture stdout for failing tests
 	TimedOut bool                   // Track if this test timed out
+
+	// Artifact naming propagation: when file sinks create a specific basename for log files,
+	// they can store it here so HTML and other sinks use exactly the same basename
+	ArtifactBaseName string
 
 	// Hierarchy tracking
 	Depth         int      // Nesting depth (0=top-level, 1=first subtest, etc.)
@@ -137,18 +141,6 @@ func ParseTestNameHierarchy(testName string) (depth int, path []string) {
 
 	depth = len(cleanPath) - 1
 	return depth, cleanPath
-}
-
-// BuildHierarchyPath creates a hierarchy path from test names
-// This is useful when constructing test results programmatically
-func BuildHierarchyPath(testNames ...string) []string {
-	path := make([]string, 0, len(testNames))
-	for _, name := range testNames {
-		if name != "" {
-			path = append(path, name)
-		}
-	}
-	return path
 }
 
 // ValidateHierarchyPath checks if a hierarchy path is valid

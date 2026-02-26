@@ -29,7 +29,6 @@ import (
 	"github.com/ethereum-optimism/infra/op-acceptor/logging"
 	"github.com/ethereum-optimism/infra/op-acceptor/metrics"
 	"github.com/ethereum-optimism/infra/op-acceptor/registry"
-	"github.com/ethereum-optimism/infra/op-acceptor/testlist"
 	"github.com/ethereum-optimism/infra/op-acceptor/types"
 	"github.com/ethereum-optimism/infra/op-acceptor/ui"
 )
@@ -38,6 +37,7 @@ import (
 // See https://cs.opensource.google/go/go/+/master:src/cmd/test2json/main.go;l=34-60
 const (
 	ActionStart  = "start"
+	ActionRun    = "run"
 	ActionPass   = "pass"
 	ActionFail   = "fail"
 	ActionSkip   = "skip"
@@ -77,6 +77,15 @@ type RunnerResult struct {
 	Stats         ResultStats
 	RunID         string
 	IsParallel    bool // Indicates if this run used parallel execution
+	// Skip summary (optional)
+	SkipCounts *SkipCounts
+}
+
+// SkipCounts captures exclusion stats from skip gates filtering
+type SkipCounts struct {
+	TotalExcluded  int `json:"total_excluded"`
+	ExcludedByPkg  int `json:"excluded_by_package"`
+	ExcludedByName int `json:"excluded_by_name"`
 }
 
 // ResultStats tracks test statistics at each level
@@ -120,6 +129,13 @@ type runner struct {
 	tracer             trace.Tracer
 	serial             bool // Whether to run tests serially instead of in parallel
 	concurrency        int  // Number of concurrent test workers (0 = auto-determine)
+
+	// New component fields
+	executor     TestExecutor
+	coordinator  TestCoordinator
+	collector    ResultCollector
+	outputParser OutputParser
+	jsonStore    JSONStore
 }
 
 // Config holds configuration for creating a new runner
@@ -135,8 +151,10 @@ type Config struct {
 	FileLogger         *logging.FileLogger // Logger for storing test results
 	NetworkName        string              // Name of the network being tested
 	DevnetEnv          *env.DevnetEnv
-	Serial             bool // Whether to run tests serially instead of in parallel
-	Concurrency        int  // Number of concurrent test workers (0 = auto-determine)
+	Serial             bool          // Whether to run tests serially instead of in parallel
+	Concurrency        int           // Number of concurrent test workers (0 = auto-determine)
+	ShowProgress       bool          // Whether to show periodic progress updates during test execution
+	ProgressInterval   time.Duration // Interval between progress updates when ShowProgress is 'true'
 }
 
 // NewTestRunner creates a new test runner instance
@@ -158,9 +176,6 @@ func NewTestRunner(cfg Config) (TestRunner, error) {
 	} else {
 		validators = cfg.Registry.GetValidators()
 	}
-	if len(validators) == 0 {
-		return nil, fmt.Errorf("no validators found")
-	}
 
 	if cfg.GoBinary == "" {
 		cfg.GoBinary = "go" // Default to "go" if not specified
@@ -175,7 +190,7 @@ func NewTestRunner(cfg Config) (TestRunner, error) {
 	cfg.Log.Debug("NewTestRunner()", "targetGate", cfg.TargetGate, "workDir", cfg.WorkDir,
 		"allowSkips", cfg.AllowSkips, "goBinary", cfg.GoBinary, "networkName", networkName, "serial", cfg.Serial)
 
-	return &runner{
+	r := &runner{
 		registry:           cfg.Registry,
 		validators:         validators,
 		workDir:            cfg.WorkDir,
@@ -190,7 +205,63 @@ func NewTestRunner(cfg Config) (TestRunner, error) {
 		tracer:             otel.Tracer("test runner"),
 		serial:             cfg.Serial,
 		concurrency:        cfg.Concurrency,
-	}, nil
+	}
+
+	// Initialize new components
+	r.outputParser = NewOutputParser()
+	r.jsonStore = NewJSONStore(cfg.FileLogger)
+	r.collector = NewResultCollector()
+
+	// Create a timeout value
+	timeout := DefaultTestTimeout
+
+	executor, err := NewTestExecutor(
+		cfg.WorkDir,
+		timeout,
+		r.goBinary,
+		r.ReproducibleEnv,
+		r.testCommandContext,
+		r.outputParser,
+		r.jsonStore,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create test executor: %w", err)
+	}
+	r.executor = executor
+
+	// Create progress indicator if ShowProgress is true
+	var progressIndicator ProgressIndicator
+	if cfg.ShowProgress {
+		progressIndicator = NewConsoleProgressIndicator(cfg.Log, cfg.ProgressInterval)
+	} else {
+		progressIndicator = NewNoOpProgressIndicator()
+	}
+
+	// Create parallel runner first if needed, then coordinator once
+	var parallelRunner ParallelRunner
+	if !cfg.Serial && cfg.Concurrency > 0 {
+		parallelExecutor := NewParallelExecutor(r, cfg.Concurrency)
+		parallelRunner = NewParallelRunnerAdapter(parallelExecutor)
+	}
+
+	// Initialize coordinator once with correct parallel runner
+	r.coordinator = NewTestCoordinator(r.executor, r.collector, parallelRunner, progressIndicator)
+
+	return r, nil
+}
+
+// GetUI implements UIProvider interface
+// Returns the progress indicator from the coordinator if available.
+//
+// Coordinator Lifecycle Contract:
+// - The coordinator MUST be initialized before parallel test execution begins
+// - The coordinator SHOULD NOT be modified during active test execution
+// - When coordinator is nil, progress tracking is gracefully disabled
+func (r *runner) GetUI() ProgressIndicator {
+	if r.coordinator != nil {
+		return r.coordinator.GetUI()
+	}
+	return nil
 }
 
 // RunAllTests implements the TestRunner interface
@@ -469,7 +540,9 @@ func (r *runner) RunTest(ctx context.Context, metadata types.ValidatorMetadata) 
 
 	// Check if the path is available locally
 	if isLocalPath(metadata.Package) {
-		fullPath := filepath.Join(r.workDir, metadata.Package)
+		// Support Go's recursive package pattern "..." by validating the base directory exists
+		basePkg := strings.TrimSuffix(metadata.Package, "/...")
+		fullPath := filepath.Join(r.workDir, basePkg)
 		if _, statErr := os.Stat(fullPath); os.IsNotExist(statErr) {
 			r.log.Error("Local package path does not exist, failing test", "validator", metadata.ID, "package", metadata.Package, "fullPath", fullPath)
 			return &types.TestResult{
@@ -502,23 +575,19 @@ func (r *runner) RunTest(ctx context.Context, metadata types.ValidatorMetadata) 
 }
 
 // runAllTestsInPackage discovers and runs all tests in a package
+// Executes the entire package as a single go test process to preserve intra-package parallelism.
 func (r *runner) runAllTestsInPackage(ctx context.Context, metadata types.ValidatorMetadata) (*types.TestResult, error) {
-	testNames, err := r.listTestsInPackage(metadata.Package)
-	if err != nil {
-		return nil, fmt.Errorf("listing tests in package %s: %w", metadata.Package, err)
+	pkgMeta := metadata
+	pkgMeta.RunAll = false
+	pkgMeta.FuncName = ""
+
+	r.log.Debug("Running package as single process", "package", pkgMeta.Package)
+	res, err := r.runSingleTest(ctx, pkgMeta)
+	if res != nil {
+		// Preserve the caller intent for reporting
+		res.Metadata.RunAll = true
 	}
-
-	r.log.Debug("Found tests in package",
-		"package", metadata.Package,
-		"count", len(testNames),
-		"tests", strings.Join(testNames, ", "))
-
-	return r.runTestList(ctx, metadata, testNames)
-}
-
-// listTestsInPackage returns all test names in a package
-func (r *runner) listTestsInPackage(pkg string) ([]string, error) {
-	return testlist.FindTestFunctions(pkg, r.workDir)
+	return res, err
 }
 
 // runTestList runs a list of tests and aggregates their results
@@ -533,7 +602,7 @@ func (r *runner) runTestList(ctx context.Context, metadata types.ValidatorMetada
 		}, nil
 	}
 
-	var result types.TestStatus = types.TestStatusPass
+	var result = types.TestStatusPass
 	var testErrors []error
 	var totalDuration time.Duration
 	testResults := make(map[string]*types.TestResult)
@@ -608,7 +677,7 @@ func (r *runner) runTestList(ctx context.Context, metadata types.ValidatorMetada
 	var finalError error
 	if len(testErrors) > 0 {
 		if timeoutCount > 0 {
-			finalError = fmt.Errorf("Package test failures include timeouts: %v", timedOutTests)
+			finalError = fmt.Errorf("package test failures include timeouts: %v", timedOutTests)
 		} else {
 			finalError = errors.Join(testErrors...)
 		}
@@ -627,9 +696,10 @@ func (r *runner) runTestList(ctx context.Context, metadata types.ValidatorMetada
 	passed := 0
 	failed := 0
 	for _, testResult := range testResults {
-		if testResult.Status == types.TestStatusPass {
+		switch testResult.Status {
+		case types.TestStatusPass:
 			passed++
-		} else if testResult.Status == types.TestStatusFail {
+		case types.TestStatusFail:
 			failed++
 		}
 	}
@@ -667,16 +737,6 @@ func (r *runner) runTestList(ctx context.Context, metadata types.ValidatorMetada
 	return packageResult, nil
 }
 
-// TestEvent represents a single event from the go test JSON output
-type TestEvent struct {
-	Time    time.Time // Time the event occurred
-	Action  string    // The action taken (run, pause, cont, pass, fail, skip, output)
-	Package string    // The package being tested
-	Test    string    // The test function name (may be empty for package events)
-	Output  string    // Output text (may be empty)
-	Elapsed float64   // Elapsed time in seconds for the specific action
-}
-
 // runSingleTest runs a specific test
 func (r *runner) runSingleTest(ctx context.Context, metadata types.ValidatorMetadata) (*types.TestResult, error) {
 	ctx, span := r.tracer.Start(ctx, fmt.Sprintf("test %s", metadata.FuncName))
@@ -684,11 +744,16 @@ func (r *runner) runSingleTest(ctx context.Context, metadata types.ValidatorMeta
 
 	var timeoutDuration time.Duration
 	if metadata.Timeout != 0 {
-		var cancel func()
 		timeoutDuration = metadata.Timeout
+	} else if metadata.FuncName == "" {
+		// Apply default timeout for package-mode runs when none provided
+		timeoutDuration = DefaultTestTimeout
+	}
+	if timeoutDuration != 0 {
+		var cancel func()
 		// This parent process timeout is redundant, add 200ms to allow child process
 		// to trigger timeout before parent process.
-		ctx, cancel = context.WithTimeout(ctx, metadata.Timeout+200*time.Millisecond)
+		ctx, cancel = context.WithTimeout(ctx, timeoutDuration+200*time.Millisecond)
 		defer cancel()
 	}
 
@@ -715,13 +780,19 @@ func (r *runner) runSingleTest(ctx context.Context, metadata types.ValidatorMeta
 		cmd.Stderr = &stderr
 	}
 
-	r.log.Info("Running test", "test", metadata.FuncName)
+	// If there's no function name use package name
+	testLabel := metadata.FuncName
+	if testLabel == "" {
+		testLabel = metadata.Package
+	}
+
+	r.log.Info("Running test", "test", testLabel)
 	r.log.Debug("Running test command",
 		"dir", cmd.Dir,
 		"package", metadata.Package,
-		"test", metadata.FuncName,
+		"test", testLabel,
 		"command", cmd.String(),
-		"timeout", metadata.Timeout,
+		"timeout", timeoutDuration,
 		"allowSkips", r.allowSkips)
 
 	// Run the command
@@ -754,57 +825,48 @@ func (r *runner) runSingleTest(ctx context.Context, metadata types.ValidatorMeta
 
 	// Handle timeout case with enhanced error messaging
 	if timeoutOccurred {
-		timeoutMsg := fmt.Sprintf("TIMEOUT: Test timed out after %v", timeoutDuration)
-		if testDuration > 0 {
-			timeoutMsg += fmt.Sprintf(" (actual duration: %v)", testDuration)
-		}
-
-		result := &types.TestResult{
-			Metadata: metadata,
-			Status:   types.TestStatusFail,
-			Error:    fmt.Errorf("%s", timeoutMsg),
-			Duration: testDuration,
-			SubTests: make(map[string]*types.TestResult),
-			TimedOut: true, // Set the timeout flag
-		}
-
-		// If we have partial stdout, include it for analysis
-		if stdout.Len() > 0 {
-			result.Stdout = stdout.String()
-			// Try to parse any partial output to extract subtest information
-			if partialResult := r.parseTestOutputWithTimeout(stdout.Bytes(), metadata, timeoutDuration); partialResult != nil {
-				result.SubTests = partialResult.SubTests
-				// Update the error to include subtest information if available
-				if len(result.SubTests) > 0 {
-					timeoutMsg += fmt.Sprintf(" - %d subtests detected in partial output", len(result.SubTests))
-					result.Error = fmt.Errorf("%s", timeoutMsg)
-				}
+		// Delegate parsing of partial output
+		parsed := r.outputParser.ParseWithTimeout(stdout.Bytes(), metadata, timeoutDuration)
+		if parsed == nil {
+			parsed = &types.TestResult{
+				Metadata: metadata,
+				Status:   types.TestStatusFail,
+				Error:    fmt.Errorf("TIMEOUT: Test exceeded timeout of %v", timeoutDuration),
+				SubTests: make(map[string]*types.TestResult),
+				TimedOut: true,
 			}
 		}
-
+		parsed.Duration = testDuration
+		// Augment error with actual duration
+		if parsed.Error != nil && testDuration > 0 {
+			parsed.Error = fmt.Errorf("%w (actual duration: %v)", parsed.Error, testDuration)
+		}
+		if stdout.Len() > 0 {
+			parsed.Stdout = stdout.String()
+		}
 		// Include stderr in the result if present
 		if stderr.Len() > 0 {
-			if result.Error != nil {
-				result.Error = fmt.Errorf("%w\nstderr: %s", result.Error, stderr.String())
+			if parsed.Error != nil {
+				parsed.Error = fmt.Errorf("%w\nstderr: %s", parsed.Error, stderr.String())
 			} else {
-				result.Error = fmt.Errorf("timeout stderr: %s", stderr.String())
+				parsed.Error = fmt.Errorf("timeout stderr: %s", stderr.String())
 			}
 		}
 
 		// Force logging of timeout result to ensure it's captured
 		if r.fileLogger != nil {
-			if logErr := r.fileLogger.LogTestResult(result, r.runID); logErr != nil {
+			if logErr := r.fileLogger.LogTestResult(parsed, r.runID); logErr != nil {
 				r.log.Error("Failed to log timeout result", "error", logErr, "test", metadata.FuncName)
 			}
 		}
 		r.log.Info("Timeout result",
 			"test", metadata.FuncName,
-			"status", result.Status,
-			"duration", result.Duration,
-			"subtests", len(result.SubTests),
-			"error", result.Error)
+			"status", parsed.Status,
+			"duration", parsed.Duration,
+			"subtests", len(parsed.SubTests),
+			"error", parsed.Error)
 
-		return result, nil
+		return parsed, nil
 	}
 
 	// Parse the JSON output for non-timeout cases
@@ -848,207 +910,7 @@ func (r *runner) runSingleTest(ctx context.Context, metadata types.ValidatorMeta
 
 // parseTestOutput parses the JSON test output and extracts test result information
 func (r *runner) parseTestOutput(output []byte, metadata types.ValidatorMetadata) *types.TestResult {
-	if len(output) == 0 {
-		r.log.Debug("Empty test output", "test", metadata.FuncName, "package", metadata.Package)
-		return newFailedTestResult(metadata, fmt.Errorf("empty test output"))
-	}
-
-	result := &types.TestResult{
-		Metadata: metadata,
-		Status:   types.TestStatusPass, // Default to pass unless determined otherwise
-		SubTests: make(map[string]*types.TestResult),
-	}
-
-	var testStart, testEnd time.Time
-	var errorMsg strings.Builder
-	var hasSkip bool
-	var hasAnyValidEvent bool
-
-	subTestStatuses := make(map[string]types.TestStatus)
-	subTestStartTimes := make(map[string]time.Time) // Map to track start times for subtests
-	lines := bytes.Split(output, []byte("\n"))
-
-	for _, line := range lines {
-		if len(line) == 0 {
-			continue
-		}
-
-		event, err := parseTestEvent(line)
-		if err != nil {
-			r.log.Debug("Failed to parse test JSON output line", "error", err, "line", string(line))
-			continue
-		}
-
-		hasAnyValidEvent = true
-
-		if isMainTestEvent(event, metadata.FuncName) {
-			processMainTestEvent(event, result, &testStart, &testEnd, &errorMsg, &hasSkip)
-		} else {
-			processSubTestEvent(event, result, subTestStatuses, subTestStartTimes, &hasSkip)
-		}
-	}
-
-	if !hasAnyValidEvent {
-		return newFailedTestResult(metadata, fmt.Errorf("no valid JSON output from test"))
-	}
-
-	// Set the test duration
-	result.Duration = calculateTestDuration(testStart, testEnd)
-
-	// Set the error message if any
-	if errorMsg.Len() > 0 {
-		result.Error = fmt.Errorf("%s", errorMsg.String())
-	}
-
-	// Final check for skipped tests
-	if hasSkip && result.Status != types.TestStatusFail && len(result.SubTests) == 0 {
-		result.Status = types.TestStatusSkip
-	}
-
-	r.log.Debug("Parsed test output",
-		"test", metadata.FuncName,
-		"package", metadata.Package,
-		"status", result.Status,
-		"subtests", len(result.SubTests),
-		"hasAnyValidEvent", hasAnyValidEvent,
-		"hasError", result.Error != nil,
-		"error", result.Error,
-	)
-
-	return result
-}
-
-// parseTestEvent parses a single line of test output into a TestEvent
-func parseTestEvent(line []byte) (TestEvent, error) {
-	var event TestEvent
-	err := json.Unmarshal(line, &event)
-	return event, err
-}
-
-// isMainTestEvent checks if the event belongs to the main test or package
-func isMainTestEvent(event TestEvent, mainTestName string) bool {
-	return event.Test == "" || event.Test == mainTestName
-}
-
-// processMainTestEvent handles events for the main test
-func processMainTestEvent(event TestEvent, result *types.TestResult, testStart, testEnd *time.Time, errorMsg *strings.Builder, hasSkip *bool) {
-	switch event.Action {
-	case ActionStart:
-		*testStart = event.Time
-	case ActionPass:
-		*testEnd = event.Time
-		result.Status = types.TestStatusPass
-	case ActionFail:
-		*testEnd = event.Time
-		result.Status = types.TestStatusFail
-		// If we have an elapsed time from the event, use it as a fallback
-		if event.Elapsed > 0 && result.Duration == 0 {
-			result.Duration = time.Duration(event.Elapsed * float64(time.Second))
-		}
-	case ActionSkip:
-		*testEnd = event.Time
-		result.Status = types.TestStatusSkip
-		*hasSkip = true
-	case ActionOutput:
-		if errorMsg.Len() > 0 {
-			errorMsg.WriteString("\n")
-		}
-		errorMsg.WriteString(event.Output)
-	}
-}
-
-// processSubTestEvent handles events for subtests
-func processSubTestEvent(event TestEvent, result *types.TestResult,
-	subTestStatuses map[string]types.TestStatus,
-	subTestStartTimes map[string]time.Time,
-	hasSkip *bool) {
-	subTest, exists := result.SubTests[event.Test]
-	if !exists {
-		subTest = &types.TestResult{
-			Metadata: types.ValidatorMetadata{
-				FuncName: event.Test,
-				Package:  result.Metadata.Package,
-			},
-			Status: types.TestStatusPass, // Default to pass
-		}
-		result.SubTests[event.Test] = subTest
-	}
-
-	switch event.Action {
-	case ActionStart:
-		// Record the start time for the subtest
-		subTestStartTimes[event.Test] = event.Time
-	case ActionPass:
-		subTest.Status = types.TestStatusPass
-		subTestStatuses[event.Test] = types.TestStatusPass
-		// Calculate duration based on start time or elapsed
-		calculateSubTestDuration(subTest, event, subTestStartTimes)
-	case ActionFail:
-		subTest.Status = types.TestStatusFail
-		subTestStatuses[event.Test] = types.TestStatusFail
-		// A failing subtest means the main test fails too
-		result.Status = types.TestStatusFail
-		// Calculate duration based on start time or elapsed
-		calculateSubTestDuration(subTest, event, subTestStartTimes)
-	case ActionSkip:
-		subTest.Status = types.TestStatusSkip
-		subTestStatuses[event.Test] = types.TestStatusSkip
-		*hasSkip = true
-		// Calculate duration based on start time or elapsed
-		calculateSubTestDuration(subTest, event, subTestStartTimes)
-	case ActionOutput:
-		updateSubTestError(subTest, event.Output)
-	}
-}
-
-// calculateSubTestDuration sets the duration for a subtest based on tracked start time or elapsed field
-func calculateSubTestDuration(subTest *types.TestResult, event TestEvent, subTestStartTimes map[string]time.Time) {
-	startTime, hasStartTime := subTestStartTimes[event.Test]
-	if hasStartTime {
-		subTest.Duration = event.Time.Sub(startTime)
-	} else if event.Elapsed > 0 {
-		// Fallback to elapsed if provided
-		subTest.Duration = time.Duration(event.Elapsed * float64(time.Second))
-	}
-
-	// If we still don't have a duration and this is a failed test, try to use the elapsed time
-	if subTest.Duration == 0 && subTest.Status == types.TestStatusFail && event.Elapsed > 0 {
-		subTest.Duration = time.Duration(event.Elapsed * float64(time.Second))
-	}
-}
-
-// updateSubTestError updates a subtest's error message
-func updateSubTestError(subTest *types.TestResult, output string) {
-	if output == "" {
-		return
-	}
-
-	if subTest.Error == nil {
-		subTest.Error = fmt.Errorf("%s", output)
-	} else {
-		subTest.Error = fmt.Errorf("%s\n%s", subTest.Error.Error(), output)
-	}
-}
-
-// calculateTestDuration calculates the duration of a test
-func calculateTestDuration(start, end time.Time) time.Duration {
-	if !start.IsZero() && !end.IsZero() {
-		return end.Sub(start)
-	} else if !start.IsZero() {
-		// If we have a start but no end, use time since start
-		return time.Since(start)
-	}
-	return 0
-}
-
-// newFailedTestResult creates a new failed test result
-func newFailedTestResult(metadata types.ValidatorMetadata, err error) *types.TestResult {
-	return &types.TestResult{
-		Metadata: metadata,
-		Status:   types.TestStatusFail,
-		Error:    err,
-		SubTests: make(map[string]*types.TestResult),
-	}
+	return r.outputParser.Parse(output, metadata)
 }
 
 // buildTestArgs constructs the command line arguments for running a test
@@ -1071,9 +933,11 @@ func (r *runner) buildTestArgs(metadata types.ValidatorMetadata) []string {
 	// Always disable caching
 	args = append(args, "-count", "1")
 
-	// Add timeout if it's not 0
+	// Add timeout: use provided value, otherwise in package-mode apply default
 	if metadata.Timeout != 0 {
 		args = append(args, "-timeout", metadata.Timeout.String())
+	} else if metadata.FuncName == "" { // package-mode
+		args = append(args, "-timeout", DefaultTestTimeout.String())
 	}
 
 	// Always use verbose output
@@ -1228,8 +1092,8 @@ func (r *RunnerResult) printSubTests(b *strings.Builder, subTests map[string]*ty
 		// Build the prefix for this depth level
 		prefix := ui.BuildTreePrefix(baseDepth, isLast, parentIsLast)
 
-		b.WriteString(fmt.Sprintf("%s Test: %s (%s) [status=%s]\n",
-			prefix, subTestName, formatDuration(subTest.Duration), subTest.Status))
+		fmt.Fprintf(b, "%s Test: %s (%s) [status=%s]\n",
+			prefix, subTestName, formatDuration(subTest.Duration), subTest.Status)
 
 		if subTest.Error != nil {
 			// Create error prefix (one level deeper, always last)
@@ -1237,7 +1101,7 @@ func (r *RunnerResult) printSubTests(b *strings.Builder, subTests map[string]*ty
 			copy(errorParentIsLast, parentIsLast)
 			errorParentIsLast[len(parentIsLast)] = isLast
 			errorPrefix := ui.BuildTreePrefix(baseDepth+1, true, errorParentIsLast)
-			b.WriteString(fmt.Sprintf("%sError: %s\n", errorPrefix, subTest.Error.Error()))
+			fmt.Fprintf(b, "%sError: %s\n", errorPrefix, subTest.Error.Error())
 		}
 
 		// Recursively print nested subtests
@@ -1347,24 +1211,7 @@ func determineRunnerStatus(result *RunnerResult) types.TestStatus {
 	return determineStatusFromFlags(allSkipped, anyFailed)
 }
 
-// determineStatusFromFlags is a helper that returns a status based on common flag logic
-func determineStatusFromFlags(allSkipped, anyFailed bool) types.TestStatus {
-	if allSkipped {
-		return types.TestStatusSkip
-	}
-	if anyFailed {
-		return types.TestStatusFail
-	}
-	return types.TestStatusPass
-}
-
 // formatErrors combines multiple test errors into a single error message
-func (r *runner) formatErrors(errors []string) string {
-	if len(errors) == 0 {
-		return ""
-	}
-	return fmt.Sprintf("Failed tests:\n%s", strings.Join(errors, "\n"))
-}
 
 // determineSuiteStatus determines the overall status of a suite based on its tests
 func determineSuiteStatus(suite *SuiteResult) types.TestStatus {
@@ -1443,6 +1290,8 @@ func (r *runner) testCommandContext(ctx context.Context, name string, arg ...str
 	if r.env == nil {
 		// For sysgo orchestrator, just add the orchestrator type to the environment
 		runEnv = append(runEnv, fmt.Sprintf("DEVSTACK_ORCHESTRATOR=%s", flags.OrchestratorSysgo))
+		// Disable color output in test logs to avoid ANSI escape sequences
+		runEnv = append(runEnv, "NO_COLOR=1")
 		cmd.Env = runEnv
 		return cmd, func() {}
 	}
@@ -1469,6 +1318,8 @@ func (r *runner) testCommandContext(ctx context.Context, name string, arg ...str
 			fmt.Sprintf("%s=%s", env.EnvURLVar, envFile.Name()),
 			// override the control resolution scheme with the original one
 			fmt.Sprintf("%s=%s", env.EnvCtrlVar, url.Scheme),
+			// Disable color output in test logs to avoid ANSI escape sequences
+			"NO_COLOR=1",
 		)
 		cmd.Env = runEnv
 	}
@@ -1487,16 +1338,36 @@ func (r *runner) ReproducibleEnv() Env {
 		orchestrator = flags.OrchestratorSysext
 	}
 
-	return Env{
+	// Prefer the runner's runID; fall back to the file logger's runID if not set
+	seedRunID := r.runID
+	if seedRunID == "" && r.fileLogger != nil {
+		seedRunID = r.fileLogger.GetRunID()
+	}
+
+	base := Env{
 		// Set the orchestrator type
 		fmt.Sprintf("DEVSTACK_ORCHESTRATOR=%s", orchestrator),
-		// Set DEVNET_EXPECT_PRECONDITIONS_MET to the opposite of allowSkips
-		// allowSkips=false -> ExpectPreconditionsMet=true (tests fail when preconditions not met)
-		// allowSkips=true -> ExpectPreconditionsMet=false (tests skip when preconditions not met)
-		fmt.Sprintf("%s=%t", env.ExpectPreconditionsMet, !r.allowSkips),
 		// salt the funder abstraction with DEVSTACK_KEYS_SALT=$runID
-		fmt.Sprintf("%s=%s", dsl.SaltEnvVar, r.runID),
+		fmt.Sprintf("%s=%s", dsl.SaltEnvVar, seedRunID),
+		// align test logging level for reproduction
+		fmt.Sprintf("TEST_LOG_LEVEL=%s", r.testLogLevel),
 	}
+	// Only set DEVNET_EXPECT_PRECONDITIONS_MET when we DO expect preconditions to be met.
+	// op-devstack treats the mere presence of this variable as "enforce preconditions".
+	// Therefore, when allowSkips=true we must NOT set the variable at all.
+	if !r.allowSkips {
+		base = append(base, fmt.Sprintf("%s=%t", env.ExpectPreconditionsMet, true))
+	}
+	// For sysext, include original ENV URL and control scheme (if available)
+	if r.env != nil && r.env.URL != "" {
+		if u, err := url.Parse(r.env.URL); err == nil {
+			base = append(base,
+				fmt.Sprintf("%s=%s", env.EnvURLVar, r.env.URL),
+				fmt.Sprintf("%s=%s", env.EnvCtrlVar, u.Scheme),
+			)
+		}
+	}
+	return base
 }
 
 type Env []string
@@ -1535,122 +1406,6 @@ func (w *logWriter) Write(p []byte) (n int, err error) {
 		}
 	}
 	return len(p), nil
-}
-
-// parseTestOutputWithTimeout parses partial test output from timed-out tests
-// It's more lenient than parseTestOutput and focuses on extracting any available subtest information
-func (r *runner) parseTestOutputWithTimeout(output []byte, metadata types.ValidatorMetadata, timeoutDuration time.Duration) *types.TestResult {
-	if len(output) == 0 {
-		r.log.Debug("Empty test output in timeout scenario", "test", metadata.FuncName, "package", metadata.Package)
-		return nil
-	}
-
-	result := &types.TestResult{
-		Metadata: metadata,
-		Status:   types.TestStatusFail, // Always fail for timeout
-		SubTests: make(map[string]*types.TestResult),
-		Error:    fmt.Errorf("TIMEOUT: Test timed out after %v", timeoutDuration),
-		TimedOut: true, // Mark as timed out
-	}
-
-	subTestStatuses := make(map[string]types.TestStatus)
-	subTestStartTimes := make(map[string]time.Time)
-	lines := bytes.Split(output, []byte("\n"))
-
-	validEventsFound := 0
-
-	for _, line := range lines {
-		if len(line) == 0 {
-			continue
-		}
-
-		event, err := parseTestEvent(line)
-		if err != nil {
-			// In timeout scenarios, be more lenient with parsing errors
-			r.log.Debug("Failed to parse test JSON output line in timeout scenario", "error", err, "line", string(line))
-			continue
-		}
-
-		validEventsFound++
-
-		if isMainTestEvent(event, metadata.FuncName) {
-			switch event.Action {
-			case ActionOutput:
-				// Store any output from the main test, might be useful for debugging timeouts
-				if result.Error != nil {
-					result.Error = fmt.Errorf("%w\nOutput: %s", result.Error, event.Output)
-				}
-			}
-		} else {
-			// Process subtest events
-			subTest, exists := result.SubTests[event.Test]
-			if !exists {
-				subTest = &types.TestResult{
-					Metadata: types.ValidatorMetadata{
-						FuncName: event.Test,
-						Package:  result.Metadata.Package,
-					},
-					Status: types.TestStatusFail, // Default to fail in timeout scenarios
-				}
-				result.SubTests[event.Test] = subTest
-			}
-
-			switch event.Action {
-			case ActionStart:
-				subTestStartTimes[event.Test] = event.Time
-				subTest.Status = types.TestStatusFail // Assume failed due to timeout unless we see completion
-			case ActionPass:
-				subTest.Status = types.TestStatusPass
-				subTestStatuses[event.Test] = types.TestStatusPass
-				calculateSubTestDuration(subTest, event, subTestStartTimes)
-			case ActionFail:
-				subTest.Status = types.TestStatusFail
-				subTestStatuses[event.Test] = types.TestStatusFail
-				calculateSubTestDuration(subTest, event, subTestStartTimes)
-			case ActionSkip:
-				subTest.Status = types.TestStatusSkip
-				subTestStatuses[event.Test] = types.TestStatusSkip
-				calculateSubTestDuration(subTest, event, subTestStartTimes)
-			case ActionOutput:
-				updateSubTestError(subTest, event.Output)
-			}
-		}
-	}
-
-	// Mark any subtests that started but didn't complete as timed out
-	for testName, subTest := range result.SubTests {
-		if _, hasStatus := subTestStatuses[testName]; !hasStatus {
-			// This subtest started but never completed - mark as timed out
-			subTest.Status = types.TestStatusFail
-			subTest.TimedOut = true // Mark subtest as timed out
-			if subTest.Error == nil {
-				subTest.Error = fmt.Errorf("SUBTEST TIMEOUT: Test timed out during execution")
-			} else {
-				subTest.Error = fmt.Errorf("%w (TIMED OUT)", subTest.Error)
-			}
-
-			// Calculate duration based on when the timeout actually occurred, not current time
-			if startTime, hasStart := subTestStartTimes[testName]; hasStart {
-				// Use the timeout duration as the maximum time this subtest could have run
-				// This is more accurate than time.Since(startTime) which could be much later
-				actualTimeout := startTime.Add(timeoutDuration)
-				subTest.Duration = actualTimeout.Sub(startTime)
-			} else {
-				// If we don't have a start time, use a fraction of the timeout as estimate
-				subTest.Duration = timeoutDuration / 2
-			}
-		}
-	}
-
-	r.log.Debug("Parsed partial timeout output",
-		"test", metadata.FuncName,
-		"package", metadata.Package,
-		"subtests", len(result.SubTests),
-		"validEvents", validEventsFound,
-		"timeout", timeoutDuration,
-	)
-
-	return result
 }
 
 // GetSpeedup returns the speedup factor (total test time / wall clock time)
@@ -1731,9 +1486,8 @@ func (r *runner) determineConcurrency(numWorkItems int) int {
 	}
 
 	// 2. Cap at reasonable upper bound to avoid resource exhaustion
-	maxReasonableConcurrency := 16 // Reasonable upper limit for most systems
-	if targetConcurrency > maxReasonableConcurrency {
-		targetConcurrency = maxReasonableConcurrency
+	if targetConcurrency > MaxReasonableConcurrency {
+		targetConcurrency = MaxReasonableConcurrency
 	}
 
 	// 3. Finally, never exceed number of work items (most important constraint)
@@ -1746,7 +1500,7 @@ func (r *runner) determineConcurrency(numWorkItems int) int {
 		"baseConcurrency", baseConcurrency,
 		"targetConcurrency", targetConcurrency,
 		"workItems", numWorkItems,
-		"reasoning", "I/O-bound acceptance tests with network and blockchain operations")
+	)
 
 	return targetConcurrency
 }

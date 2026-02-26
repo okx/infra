@@ -86,6 +86,8 @@ type Server struct {
 	rateLimitHeader         string
 	interopValidatingConfig InteropValidationConfig
 	interopStrategy         InteropStrategy
+	publicAccess            bool
+	enableTxHashLogging     bool
 }
 
 type limiterFunc func(method string) bool
@@ -99,6 +101,7 @@ func NewServer(
 	rpcMethodMappings map[string]string,
 	maxBodySize int64,
 	authenticatedPaths map[string]string,
+	publicAccess bool,
 	timeout time.Duration,
 	maxUpstreamBatchSize int,
 	enableServedByHeader bool,
@@ -112,6 +115,7 @@ func NewServer(
 	limiterFactory limiterFactoryFunc,
 	interopValidatingConfig InteropValidationConfig,
 	interopStrategy InteropStrategy,
+	enableTxHashLogging bool,
 ) (*Server, error) {
 	if cache == nil {
 		cache = &NoopRPCCache{}
@@ -191,6 +195,7 @@ func NewServer(
 		rpcMethodMappings:    rpcMethodMappings,
 		maxBodySize:          maxBodySize,
 		authenticatedPaths:   authenticatedPaths,
+		publicAccess:         publicAccess,
 		timeout:              timeout,
 		maxUpstreamBatchSize: maxUpstreamBatchSize,
 		enableServedByHeader: enableServedByHeader,
@@ -212,6 +217,7 @@ func NewServer(
 		rateLimitHeader:         rateLimitHeader,
 		interopValidatingConfig: interopValidatingConfig,
 		interopStrategy:         interopStrategy,
+		enableTxHashLogging:     enableTxHashLogging,
 	}, nil
 }
 
@@ -531,7 +537,7 @@ func (s *Server) handleBatchRPC(ctx context.Context, reqs []json.RawMessage, isL
 
 		group := s.rpcMethodMappings[parsedReq.Method]
 		if group == "" {
-			// use unknown below to prevent DOS vector that fills up memory
+			// Use constant method_not_allowed to prevent DOS vector that fills up memory
 			// with arbitrary method names.
 			log.Info(
 				"blocked request for non-whitelisted method",
@@ -539,7 +545,7 @@ func (s *Server) handleBatchRPC(ctx context.Context, reqs []json.RawMessage, isL
 				"req_id", GetReqID(ctx),
 				"method", parsedReq.Method,
 			)
-			RecordRPCError(ctx, BackendProxyd, MethodUnknown, ErrMethodNotWhitelisted)
+			RecordRPCError(ctx, BackendProxyd, MethodNotAllowed, ErrMethodNotWhitelisted)
 			responses[i] = NewRPCErrorRes(parsedReq.ID, ErrMethodNotWhitelisted)
 			continue
 		}
@@ -574,7 +580,7 @@ func (s *Server) handleBatchRPC(ctx context.Context, reqs []json.RawMessage, isL
 		// limits apply regardless of origin or user-agent. As such, they don't use the
 		// isLimited method.
 		if parsedReq.Method == "eth_sendRawTransaction" || parsedReq.Method == "eth_sendRawTransactionConditional" {
-			tx, err := convertSendReqToSendTx(ctx, parsedReq)
+			tx, err := s.convertSendReqToSendTx(ctx, parsedReq)
 			if err != nil {
 				RecordRPCError(ctx, BackendProxyd, parsedReq.Method, err)
 				responses[i] = NewRPCErrorRes(parsedReq.ID, err)
@@ -695,7 +701,7 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	clientConn.SetReadLimit(s.maxBodySize)
 
-	proxier, err := s.wsBackendGroup.ProxyWS(ctx, clientConn, s.wsMethodWhitelist)
+	proxier, err := s.wsBackendGroup.ProxyWS(ctx, clientConn, s.wsMethodWhitelist, s.maxBodySize)
 	if err != nil {
 		if errors.Is(err, ErrNoBackends) {
 			RecordUnserviceableRequest(ctx, RPCRequestSourceWS)
@@ -736,14 +742,25 @@ func (s *Server) populateContext(w http.ResponseWriter, r *http.Request) context
 	}
 
 	if len(s.authenticatedPaths) > 0 {
-		if authorization == "" || s.authenticatedPaths[authorization] == "" {
-			log.Info("blocked unauthorized request", "authorization", authorization)
+		if authorization == "" {
+			// No API key provided - allow if public access is enabled
+			if s.publicAccess {
+				log.Debug("allowing unauthenticated request due to public_access enabled")
+			} else {
+				log.Info("blocked unauthorized request", "authorization", authorization)
+				httpResponseCodesTotal.WithLabelValues("401").Inc()
+				w.WriteHeader(401)
+				return nil
+			}
+		} else if s.authenticatedPaths[authorization] == "" {
+			// Invalid API key provided - always reject regardless of public_access
 			httpResponseCodesTotal.WithLabelValues("401").Inc()
 			w.WriteHeader(401)
 			return nil
+		} else {
+			// Valid authentication provided
+			ctx = context.WithValue(ctx, ContextKeyAuth, s.authenticatedPaths[authorization]) // nolint:staticcheck
 		}
-
-		ctx = context.WithValue(ctx, ContextKeyAuth, s.authenticatedPaths[authorization]) // nolint:staticcheck
 	}
 
 	return context.WithValue(
@@ -785,7 +802,7 @@ func (s *Server) isGlobalLimit(method string) bool {
 }
 
 // convertSendReqToSendTx converts a sendRawTransaction or sendRawTransactionConditional rpc to a transaction.
-func convertSendReqToSendTx(ctx context.Context, req *RPCReq) (*types.Transaction, error) {
+func (s *Server) convertSendReqToSendTx(ctx context.Context, req *RPCReq) (*types.Transaction, error) {
 	var params []any
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		log.Debug("error unmarshalling raw transaction params", "err", err, "req_Id", GetReqID(ctx))
@@ -821,6 +838,18 @@ func convertSendReqToSendTx(ctx context.Context, req *RPCReq) (*types.Transactio
 		return nil, ErrInvalidParams(err.Error())
 	}
 
+	// Log transaction hash for all sendRawTransaction requests if enabled
+	if s.enableTxHashLogging {
+		log.Info("processing sendRawTransaction",
+			"tx_hash", tx.Hash(),
+			"method", req.Method,
+			"req_id", GetReqID(ctx),
+			"auth", GetAuthCtx(ctx),
+			"chain_id", tx.ChainId(),
+			"nonce", tx.Nonce(),
+		)
+	}
+
 	return tx, nil
 }
 
@@ -832,7 +861,15 @@ func (s *Server) genericRateLimitSender(ctx context.Context, tx *types.Transacti
 		return txpool.ErrInvalidSender
 	}
 
-	signer := types.LatestSignerForChainID(tx.ChainId())
+	var signer types.Signer
+	// If you pass in a zero chain ID, types.LatestSignerForChainID panics. So we need to handle that case
+	// manually.
+	if tx.ChainId().Sign() == 0 {
+		signer = new(types.HomesteadSigner)
+	} else {
+		signer = types.LatestSignerForChainID(tx.ChainId())
+	}
+
 	from, err := types.Sender(signer, tx)
 	if err != nil {
 		log.Debug("could not get sender from transaction", "err", err, "req_id", GetReqID(ctx))

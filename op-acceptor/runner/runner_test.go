@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"github.com/ethereum-optimism/infra/op-acceptor/types"
 	"github.com/ethereum-optimism/infra/op-acceptor/ui"
 	"github.com/ethereum-optimism/optimism/devnet-sdk/shell/env"
+	"github.com/ethereum-optimism/optimism/op-service/testlog"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,7 +32,33 @@ func initGoModule(t testing.TB, dir string, pkgPath string) {
 	require.NoError(t, err)
 }
 
-func setupTestRunner(t *testing.T, testContent, configContent []byte) *runner {
+type TestRunnerOption func(*Config)
+
+func WithShowProgress(enabled bool) TestRunnerOption {
+	return func(c *Config) {
+		c.ShowProgress = enabled
+	}
+}
+
+func WithProgressInterval(interval time.Duration) TestRunnerOption {
+	return func(c *Config) {
+		c.ProgressInterval = interval
+	}
+}
+
+func WithLogger(logger log.Logger) TestRunnerOption {
+	return func(c *Config) {
+		c.Log = logger
+	}
+}
+
+func WithSerial(serial bool) TestRunnerOption {
+	return func(c *Config) {
+		c.Serial = serial
+	}
+}
+
+func setupTestRunner(t *testing.T, testContent, configContent []byte, opts ...TestRunnerOption) *runner {
 	// Create test directory and config file
 	testDir := t.TempDir()
 
@@ -57,10 +85,21 @@ func setupTestRunner(t *testing.T, testContent, configContent []byte) *runner {
 	})
 	require.NoError(t, err)
 
-	r, err := NewTestRunner(Config{
+	lgr := testlog.Logger(t, slog.LevelDebug)
+
+	// Start with default config
+	config := Config{
 		Registry: reg,
 		WorkDir:  testDir,
-	})
+		Log:      lgr,
+	}
+
+	// Apply all options
+	for _, opt := range opts {
+		opt(&config)
+	}
+
+	r, err := NewTestRunner(config)
 	require.NoError(t, err)
 	return r.(*runner)
 }
@@ -94,7 +133,7 @@ gates:
       - name: TestTwo
         package: "./feature"
 `)
-	return setupTestRunner(t, testContent, configContent)
+	return setupTestRunner(t, testContent, configContent, WithShowProgress(true), WithProgressInterval(100*time.Millisecond))
 }
 
 func TestRunTest_SingleTest(t *testing.T) {
@@ -197,7 +236,7 @@ func TestBuildTestArgs(t *testing.T) {
 				Package: "pkg/foo",
 				RunAll:  true,
 			},
-			want: []string{"test", "pkg/foo", "-count", "1", "-v", "-json"},
+			want: []string{"test", "pkg/foo", "-count", "1", "-timeout", "10m0s", "-v", "-json"},
 		},
 		{
 			name: "no package specified",
@@ -211,39 +250,6 @@ func TestBuildTestArgs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := r.buildTestArgs(tt.metadata)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
-func TestFormatErrors(t *testing.T) {
-	r := setupDefaultTestRunner(t)
-
-	tests := []struct {
-		name   string
-		errors []string
-		want   string
-	}{
-		{
-			name:   "no errors",
-			errors: nil,
-			want:   "",
-		},
-		{
-			name:   "single error",
-			errors: []string{"test failed"},
-			want:   "Failed tests:\ntest failed",
-		},
-		{
-			name:   "multiple errors",
-			errors: []string{"test1 failed", "test2 failed"},
-			want:   "Failed tests:\ntest1 failed\ntest2 failed",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := r.formatErrors(tt.errors)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -284,6 +290,39 @@ func TestTwo(t *testing.T) {
 		gate := result.Gates["direct-test-gate"]
 		assert.Empty(t, gate.Suites, "should have no suites")
 		assert.Len(t, gate.Tests, 2, "should have two direct tests")
+	})
+
+	// Separate test to verify all-excluded becomes a no-op
+	t.Run("all tests excluded becomes noop", func(t *testing.T) {
+		cfgContent := []byte(`
+gates:
+  - id: base
+    tests:
+      - name: TestT1
+        package: "./feature"
+`)
+		testContent2 := []byte(`
+package feature_test
+
+import "testing"
+
+func TestT1(t *testing.T) { t.Log("T1 running") }
+`)
+		_ = setupTestRunner(t, testContent2, cfgContent)
+		// Write a temp validators file
+		tmpDir := t.TempDir()
+		cfgPath := filepath.Join(tmpDir, "validators.yaml")
+		require.NoError(t, os.WriteFile(cfgPath, cfgContent, 0644))
+
+		reg, err := registry.NewRegistry(registry.Config{ValidatorConfigFile: cfgPath, ExcludeGates: []string{"base"}})
+		require.NoError(t, err)
+
+		rr, err := NewTestRunner(Config{Registry: reg, WorkDir: t.TempDir(), Log: log.New()})
+		require.NoError(t, err)
+
+		res, err := rr.RunAllTests(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, 0, res.Stats.Total)
 	})
 
 	t.Run("gate with inheritance", func(t *testing.T) {
@@ -1043,9 +1082,10 @@ gates:
 	// Find the normal and panicking tests
 	var normalTest, panicTest *types.TestResult
 	for _, test := range suite.Tests {
-		if test.Metadata.FuncName == "TestNormal" {
+		switch test.Metadata.FuncName {
+		case "TestNormal":
 			normalTest = test
-		} else if test.Metadata.FuncName == "TestPanic" {
+		case "TestPanic":
 			panicTest = test
 		}
 	}
@@ -1103,7 +1143,7 @@ gates:
 			allowSkips: false,
 		},
 		{
-			name:       "With allowSkips=true, environment variable should be set to false",
+			name:       "With allowSkips=true, environment variable should not be set",
 			allowSkips: true,
 		},
 	}
@@ -1157,8 +1197,8 @@ gates:
 
 			// Verify the correct environment variable behavior based on allowSkips
 			if tc.allowSkips {
-				assert.Contains(t, output, "ENV_VAR_CHECK: DEVNET_EXPECT_PRECONDITIONS_MET=false",
-					"DEVNET_EXPECT_PRECONDITIONS_MET should be set to 'false' when allowSkips=true")
+				assert.Contains(t, output, "ENV_VAR_CHECK: DEVNET_EXPECT_PRECONDITIONS_MET is not set",
+					"DEVNET_EXPECT_PRECONDITIONS_MET should not be set when allowSkips=true")
 			} else {
 				assert.Contains(t, output, "ENV_VAR_CHECK: DEVNET_EXPECT_PRECONDITIONS_MET=true",
 					"DEVNET_EXPECT_PRECONDITIONS_MET should be set to 'true' when allowSkips=false")
@@ -1594,7 +1634,7 @@ func TestRunTest_PackagePath_Local(t *testing.T) {
 	r := setupDefaultTestRunner(t)
 
 	origPath := os.Getenv("PATH")
-	defer os.Setenv("PATH", origPath)
+	defer func() { _ = os.Setenv("PATH", origPath) }()
 
 	testCases := []struct {
 		name         string
@@ -1624,6 +1664,53 @@ func TestRunTest_PackagePath_Local(t *testing.T) {
 			assert.Contains(t, result.Error.Error(), tc.expectErrMsg)
 		})
 	}
+}
+
+// TestUserEnvironmentForwarding verifies that arbitrary user-provided environment variables
+// are forwarded into the child `go test` process that op-acceptor spawns.
+// This covers the use-case from op-devstack where variables like DEVSTACK_L2CL_KIND
+// may influence behavior and should be honored by tests.
+func TestUserEnvironmentForwarding(t *testing.T) {
+	ctx := context.Background()
+	r := setupDefaultTestRunner(t)
+
+	// Create a test that reads a specific env var and logs it
+	testContent := []byte(`
+package main
+
+import (
+    "os"
+    "testing"
+)
+
+func TestEnvForwarding(t *testing.T) {
+    if v := os.Getenv("DEVSTACK_L2CL_KIND"); v == "" {
+        t.Fatalf("DEVSTACK_L2CL_KIND not forwarded")
+    } else {
+        t.Logf("DEVSTACK_L2CL_KIND=%s", v)
+    }
+}
+`)
+	err := os.WriteFile(filepath.Join(r.workDir, "main_test.go"), testContent, 0644)
+	require.NoError(t, err)
+
+	// Ensure our process environment contains the variable that should be forwarded.
+	// The runner builds the child env based on os.Environ() with additions, so setting
+	// here simulates a user invoking `DEVSTACK_L2CL_KIND=kind op-acceptor ...`.
+	const key = "DEVSTACK_L2CL_KIND"
+	const val = "super"
+	t.Setenv(key, val)
+
+	// Run the test through the runner, which will spawn `go test`.
+	res, err := r.RunTest(ctx, types.ValidatorMetadata{
+		ID:       "env-forward",
+		Gate:     "test-gate",
+		FuncName: "TestEnvForwarding",
+		Package:  ".",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, types.TestStatusPass, res.Status)
+	assert.Contains(t, res.Stdout, "DEVSTACK_L2CL_KIND=super")
 }
 
 func TestPackageTimeoutErrorMessage(t *testing.T) {
@@ -1678,7 +1765,7 @@ gates:
       - name: TestFast
         package: "."
         timeout: 2s
-      - name: TestSlowTimeout  
+      - name: TestSlowTimeout
         package: "."
         timeout: 1s
       - name: TestAnotherSlowTimeout
@@ -1750,21 +1837,21 @@ gates:
 	require.NotNil(t, result.Error)
 	errorMsg := result.Error.Error()
 
-	// The error message should contain "Package test failures include timeouts:" followed by test names
-	require.Contains(t, errorMsg, "Package test failures include timeouts:")
+	// The error message should contain "package test failures include timeouts:" followed by test names
+	require.Contains(t, errorMsg, "package test failures include timeouts:")
 
 	// The error message should contain the names of the timed out tests
 	require.Contains(t, errorMsg, "TestSlowTimeout")
 	require.Contains(t, errorMsg, "TestAnotherSlowTimeout")
 
-	// Verify the format - it should look like: "Package test failures include timeouts: [TestSlowTimeout TestAnotherSlowTimeout]"
-	require.Regexp(t, `Package test failures include timeouts: \[.*TestSlowTimeout.*TestAnotherSlowTimeout.*\]`, errorMsg)
+	// Verify the format - it should look like: "package test failures include timeouts: [TestSlowTimeout TestAnotherSlowTimeout]"
+	require.Regexp(t, `package test failures include timeouts: \[.*TestSlowTimeout.*TestAnotherSlowTimeout.*\]`, errorMsg)
 
 	// Verify that the skipped test is marked as skipped
 	require.Contains(t, result.SubTests, "TestSkipped", "Skipped test should be present in results")
 	skippedTest := result.SubTests["TestSkipped"]
 	require.Equal(t, types.TestStatusSkip, skippedTest.Status, "TestSkipped should have skip status")
-	require.Contains(t, skippedTest.Error.Error(), "This test is intentionally skipped", "Skip message should be preserved")
+	require.Nil(t, skippedTest.Error, "Skipped tests should not have error messages (skip reasons are not errors)")
 
 	t.Logf("Package timeout error message: %s", errorMsg)
 }
@@ -1999,10 +2086,11 @@ gates:
 	})
 
 	t.Run("reproducible environment includes orchestrator", func(t *testing.T) {
-		// Test sysgo
+		// Test sysgo with allowSkips=false (default)
 		r := setupTestRunner(t, testContent, configContent)
 		r.env = nil
 		r.runID = "test-run-id"
+		r.allowSkips = false
 
 		reproEnv := r.ReproducibleEnv()
 		envStr := reproEnv.String()
@@ -2010,7 +2098,7 @@ gates:
 		assert.Contains(t, envStr, "DEVNET_EXPECT_PRECONDITIONS_MET=true")
 		assert.Contains(t, envStr, "DEVSTACK_KEYS_SALT=test-run-id")
 
-		// Test sysext
+		// Test sysext with allowSkips=false (default)
 		r.env = &env.DevnetEnv{
 			URL: "file:///tmp/test.json",
 		}
@@ -2020,5 +2108,141 @@ gates:
 		assert.Contains(t, envStr, fmt.Sprintf("DEVSTACK_ORCHESTRATOR=%s", flags.OrchestratorSysext))
 		assert.Contains(t, envStr, "DEVNET_EXPECT_PRECONDITIONS_MET=true")
 		assert.Contains(t, envStr, "DEVSTACK_KEYS_SALT=test-run-id")
+
+		// Test with allowSkips=true
+		r.allowSkips = true
+		reproEnv = r.ReproducibleEnv()
+		envStr = reproEnv.String()
+		assert.Contains(t, envStr, fmt.Sprintf("DEVSTACK_ORCHESTRATOR=%s", flags.OrchestratorSysext))
+		assert.NotContains(t, envStr, "DEVNET_EXPECT_PRECONDITIONS_MET")
+		assert.Contains(t, envStr, "DEVSTACK_KEYS_SALT=test-run-id")
 	})
+}
+func TestStdoutCaptured_PackageModeAndSingleTest(t *testing.T) {
+	ctx := context.Background()
+	// Create a runner with a simple package that logs to stdout
+	testContent := []byte(`
+package feature_test
+
+import "testing"
+
+func TestLogsA(t *testing.T) { t.Log("alpha") }
+func TestLogsB(t *testing.T) { t.Log("beta") }
+`)
+	configContent := []byte(`
+gates:
+  - id: out-gate
+    description: "Gate with stdout tests"
+    suites:
+      out-suite:
+        description: "Suite"
+        tests:
+          - package: "./feature"
+            run_all: true
+    tests:
+      - name: TestLogsA
+        package: "./feature"
+`)
+	r := setupTestRunner(t, testContent, configContent)
+
+	// 1) Package mode (FuncName empty): should capture stdout in the package result
+	pkgRes, err := r.RunTest(ctx, types.ValidatorMetadata{
+		ID:      "pkg",
+		Gate:    "out-gate",
+		Suite:   "out-suite",
+		Package: "./feature",
+		RunAll:  true,
+		Type:    types.ValidatorTypeTest,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, pkgRes)
+	// Stdout for package mode may be large; just ensure non-empty and contains JSON or RUN markers
+	require.NotEmpty(t, pkgRes.Stdout)
+	assert.Contains(t, pkgRes.Stdout, "=== RUN")
+
+	// 2) Single test mode: capture stdout for the single test result
+	singleRes, err := r.RunTest(ctx, types.ValidatorMetadata{
+		ID:       "single",
+		Gate:     "out-gate",
+		FuncName: "TestLogsA",
+		Package:  "./feature",
+		Type:     types.ValidatorTypeTest,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, singleRes)
+	require.NotEmpty(t, singleRes.Stdout)
+	assert.Contains(t, singleRes.Stdout, "alpha")
+}
+
+// Verifies that specifying a package glob ("./parent/...") in a gate includes sub-packages
+func TestGate_PackageGlobIncludesSubpackages(t *testing.T) {
+	ctx := context.Background()
+
+	// Gate config uses a glob to include all sub-packages under ./parent
+	configContent := []byte(`
+gates:
+  - id: glob-gate
+    description: "Gate with glob package"
+    suites:
+      glob-suite:
+        description: "Suite with globbed packages"
+        tests:
+          - package: "./parent/..."
+            run_all: true
+`)
+
+	// Initialize runner
+	r := setupTestRunner(t, nil, configContent)
+
+	// Create parent and child packages with tests
+	parentPkg := filepath.Join(r.workDir, "parent", "pkg1")
+	childPkg := filepath.Join(r.workDir, "parent", "child", "pkg2")
+	require.NoError(t, os.MkdirAll(parentPkg, 0755))
+	require.NoError(t, os.MkdirAll(childPkg, 0755))
+
+	parentTest := []byte(`package pkg1_test
+
+import "testing"
+
+func TestParentPkg(t *testing.T) { t.Log("parent ok") }
+`)
+	childTest := []byte(`package pkg2_test
+
+import "testing"
+
+func TestChildPkg(t *testing.T) { t.Log("child ok") }
+`)
+
+	require.NoError(t, os.WriteFile(filepath.Join(parentPkg, "pkg1_test.go"), parentTest, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(childPkg, "pkg2_test.go"), childTest, 0644))
+
+	// Execute
+	result, err := r.RunAllTests(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// Verify gate and suite
+	require.Contains(t, result.Gates, "glob-gate")
+	gate := result.Gates["glob-gate"]
+	require.Contains(t, gate.Suites, "glob-suite")
+	suite := gate.Suites["glob-suite"]
+
+	// Should have exactly one package-level test entry (the glob), with subtests from both packages
+	require.Len(t, suite.Tests, 1)
+	var pkgTest *types.TestResult
+	for _, tRes := range suite.Tests {
+		pkgTest = tRes
+		break
+	}
+	require.NotNil(t, pkgTest)
+	assert.True(t, pkgTest.Metadata.RunAll)
+	assert.Equal(t, types.TestStatusPass, pkgTest.Status)
+
+	// The package-mode subtests should include both TestParentPkg and TestChildPkg
+	// Count should be 2 and both should be present
+	require.Len(t, pkgTest.SubTests, 2)
+	_, hasParent := pkgTest.SubTests["TestParentPkg"]
+	_, hasChild := pkgTest.SubTests["TestChildPkg"]
+	assert.True(t, hasParent, "should contain TestParentPkg from parent package")
+	assert.True(t, hasChild, "should contain TestChildPkg from child subpackage")
 }

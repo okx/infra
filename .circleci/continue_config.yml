@@ -2,6 +2,7 @@ version: 2.1
 
 orbs:
   gcp-cli: circleci/gcp-cli@3.3.0
+  circleci-utils: ethereum-optimism/circleci-utils@1.0.20
 
 parameters:
   run-build-op-conductor-mon:
@@ -90,7 +91,8 @@ jobs:
     environment:
       CURRENT_TAG: << pipeline.git.tag >>
     steps:
-      - checkout
+      - checkout:
+          method: blobless
       - run:
           name: Log Configuration Results
           command: |
@@ -195,7 +197,8 @@ jobs:
     machine:
       image: <<pipeline.parameters.vm-image>>
     steps:
-      - checkout
+      - checkout:
+          method: blobless
       - run:
           command: mkdir -p /tmp/docker_images
       - run:
@@ -307,7 +310,8 @@ jobs:
     steps:
       - gcp-cli/install
       - gcp-oidc-authenticate
-      - checkout
+      - checkout:
+          method: blobless
       - run:
           name: Tag
           command: |
@@ -321,8 +325,9 @@ jobs:
         type: string
     docker:
       - image: cimg/go:1.23
+        user: root
     steps:
-      - checkout
+      - circleci-utils/checkout-with-mise
       - run:
           name: run generate
           command: |
@@ -336,10 +341,15 @@ jobs:
       - run:
           name: run lint
           command: |
-            if [ -f .golangci.yml ]; then
-             golangci-lint run -c .golangci.yml -E goimports,sqlclosecheck,bodyclose,asciicheck,misspell,errorlint -e "errors.As" -e "errors.Is" --timeout "5m0s" ./...
+            if [ "<<parameters.module>>" = "op-acceptor" ]; then
+              make lint
             else
-             golangci-lint run -E goimports,sqlclosecheck,bodyclose,asciicheck,misspell,errorlint -e "errors.As" -e "errors.Is" --timeout "5m0s" ./...
+              # Original lint command for other projects
+              if [ -f .golangci.yml ]; then
+               golangci-lint run -c .golangci.yml -E goimports,sqlclosecheck,bodyclose,asciicheck,misspell,errorlint -e "errors.As" -e "errors.Is" --timeout "5m0s" ./...
+              else
+               golangci-lint run -E goimports,sqlclosecheck,bodyclose,asciicheck,misspell,errorlint -e "errors.As" -e "errors.Is" --timeout "5m0s" ./...
+              fi
             fi
           working_directory: <<parameters.module>>
 
@@ -349,14 +359,24 @@ jobs:
         description: Go Module Name
         type: string
     docker:
-      - image: us-docker.pkg.dev/oplabs-tools-artifacts/images/ci-builder:latest # only used to enable codecov.
+      - image: cimg/go:1.23
+        user: root
       - image: cimg/postgres:14.6
         environment:
           POSTGRES_USER: opc
           POSTGRES_HOST_AUTH_METHOD: trust
-    resource_class: small
+    resource_class: medium
     steps:
-      - checkout
+      - run:
+          name: Install codecov
+          command: |
+            # Install codecov CLI (previously provided by ci-builder image)
+            if ! command -v codecov &> /dev/null; then
+              curl -Os https://uploader.codecov.io/latest/linux/codecov
+              chmod +x codecov
+              sudo mv codecov /usr/local/bin/
+            fi
+      - circleci-utils/checkout-with-mise
       - run:
           name: go version
           command: go version
@@ -371,8 +391,9 @@ jobs:
       - run:
           name: run tests
           command: |
+            # Use gotestsum with junit output for CircleCI
             gotestsum --format=standard-verbose --junitfile=/tmp/test-results/<<parameters.module>>.xml \
-            -- -coverpkg=github.com/ethereum-optimism/infra/... -coverprofile=coverage.out ./...
+            -- -ldflags="-checklinkname=0" -coverpkg=github.com/ethereum-optimism/infra/... -coverprofile=coverage.out ./...
           working_directory: <<parameters.module>>
       - run:
           name: upload coverage
@@ -399,7 +420,17 @@ jobs:
       - gcp-oidc-authenticate:
           gcp_cred_config_file_path: /root/gcp_cred_config.json
           oidc_token_file_path: /root/oidc_token.json
-      - checkout
+      - checkout:
+          method: blobless
+      - run:
+          name: Setup mise
+          command: |
+            # Install mise
+            curl -fsSL https://mise.run | sh
+            echo 'eval "$($HOME/.local/bin/mise activate bash)"' >> $BASH_ENV
+            source $BASH_ENV
+            # Install tools from mise.toml
+            mise install --verbose
       - run:
           name: Install goreleaser pro
           command: |
@@ -417,11 +448,31 @@ jobs:
           command: |
             goreleaser release --clean -f ./<<parameters.module>>/<<parameters.filename>>
 
+  # Run full op-acceptor suite, including acceptance tests via make test-all
+  op-acceptor-test-all:
+    docker:
+      - image: cimg/go:1.23
+        user: root
+    resource_class: medium
+    steps:
+      - circleci-utils/checkout-with-mise
+      - run:
+          name: go version
+          command: go version
+      - run:
+          name: run test-all
+          command: make test-all
+          working_directory: op-acceptor
+      - store_artifacts:
+          path: op-acceptor/logs
+          destination: op-acceptor-logs
+
   op-conductor-ops-lint:
     docker:
       - image: cimg/python:3.12
     steps:
-      - checkout # Checks out code to ~/project
+      - checkout: # Checks out code to ~/project
+          method: blobless
       - restore_cache:
           keys:
             # Checksum relative to the root of the project
@@ -603,12 +654,14 @@ workflows:
       - go-test:
           name: op-acceptor-tests
           module: op-acceptor
+      - op-acceptor-test-all
       - docker-build:
           name: op-acceptor-docker-build
           docker_file: op-acceptor/Dockerfile
           docker_name: op-acceptor
           docker_tags: <<pipeline.git.revision>>,<<pipeline.git.branch>>
           docker_context: .
+
   replica-healthcheck:
     when:
       or: [<< pipeline.parameters.run-build-rhc >>, << pipeline.parameters.run-all >>]

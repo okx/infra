@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -322,7 +323,8 @@ type Backend struct {
 	networkRequestsSlidingWindow    *sw.AvgSlidingWindow
 	intermittentErrorsSlidingWindow *sw.AvgSlidingWindow
 
-	weight int
+	weight             int
+	allowedStatusCodes []int
 }
 
 type BackendOpt func(b *Backend)
@@ -331,6 +333,12 @@ func WithBasicAuth(username, password string) BackendOpt {
 	return func(b *Backend) {
 		b.authUsername = username
 		b.authPassword = password
+	}
+}
+
+func WithAllowedStatusCodes(allowedStatusCodes []int) BackendOpt {
+	return func(b *Backend) {
+		b.allowedStatusCodes = allowedStatusCodes
 	}
 }
 
@@ -542,6 +550,7 @@ func NewBackend(
 		latencySlidingWindow:            sw.NewSlidingWindow(),
 		networkRequestsSlidingWindow:    sw.NewSlidingWindow(),
 		intermittentErrorsSlidingWindow: sw.NewSlidingWindow(),
+		allowedStatusCodes:              []int{400, 413}, // Alchemy returns a 400 on bad JSONs, and Quicknode returns a 413 on too large requests
 	}
 
 	backend.Override(opts...)
@@ -658,10 +667,15 @@ func (b *Backend) Forward(ctx context.Context, reqs []*RPCReq, isBatch bool) ([]
 	return nil, wrapErr(lastError, "permanent error forwarding request")
 }
 
-func (b *Backend) ProxyWS(clientConn *websocket.Conn, methodWhitelist *StringSet) (*WSProxier, error) {
+func (b *Backend) ProxyWS(clientConn *websocket.Conn, methodWhitelist *StringSet, serverReadLimit int64) (*WSProxier, error) {
 	backendConn, _, err := b.dialer.Dial(b.wsURL, nil) // nolint:bodyclose
 	if err != nil {
 		return nil, wrapErr(err, "error dialing backend")
+	}
+	if b.maxResponseSize != 0 {
+		backendConn.SetReadLimit(b.maxResponseSize)
+	} else {
+		backendConn.SetReadLimit(serverReadLimit)
 	}
 
 	activeBackendWsConnsGauge.WithLabelValues(b.Name).Inc()
@@ -798,6 +812,9 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 
 	start := time.Now()
 	httpRes, err := b.client.DoLimited(httpReq)
+	if httpRes != nil && httpRes.Body != nil {
+		defer httpRes.Body.Close()
+	}
 	if err != nil {
 		if !(errors.Is(err, context.Canceled) || errors.Is(err, ErrTooManyRequests)) {
 			b.intermittentErrorsSlidingWindow.Incr()
@@ -821,14 +838,13 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 		strconv.FormatBool(isBatch),
 	).Inc()
 
-	// Alchemy returns a 400 on bad JSONs, so handle that case
-	if httpRes.StatusCode != 200 && httpRes.StatusCode != 400 {
+	// if the response in unsuccessful and its status code is unexpected, consider that as an unhealthy backend
+	if httpRes.StatusCode != 200 && !slices.Contains(b.allowedStatusCodes, httpRes.StatusCode) {
 		b.intermittentErrorsSlidingWindow.Incr()
 		RecordBackendNetworkErrorRateSlidingWindow(b, b.ErrorRate())
 		return nil, fmt.Errorf("response code %d", httpRes.StatusCode)
 	}
 
-	defer httpRes.Body.Close()
 	resB, err := io.ReadAll(LimitReader(httpRes.Body, b.maxResponseSize))
 	if errors.Is(err, ErrLimitReaderOverLimit) {
 		return nil, ErrBackendResponseTooLarge
@@ -956,6 +972,7 @@ type BackendGroup struct {
 	FallbackBackends       map[string]bool
 	routingStrategy        RoutingStrategy
 	multicallRPCErrorCheck bool
+	maxBlockRange          uint64
 }
 
 func (bg *BackendGroup) GetRoutingStrategy() RoutingStrategy {
@@ -997,6 +1014,8 @@ func (bg *BackendGroup) Forward(ctx context.Context, rpcReqs []*RPCReq, isBatch 
 	// We also rewrite block tags to enforce compliance with consensus
 	if bg.Consensus != nil {
 		rpcReqs, overriddenResponses = bg.OverwriteConsensusResponses(rpcReqs, overriddenResponses, rewrittenReqs)
+	} else if bg.maxBlockRange > 0 {
+		rpcReqs, overriddenResponses = bg.OverwriteNonConsensusRequests(rpcReqs, overriddenResponses)
 	}
 
 	// Choose backends to forward the request to, after rewriting the requests
@@ -1176,9 +1195,9 @@ func (bg *BackendGroup) ProcessMulticallResponses(ch chan *multicallTuple, ctx c
 	}
 }
 
-func (bg *BackendGroup) ProxyWS(ctx context.Context, clientConn *websocket.Conn, methodWhitelist *StringSet) (*WSProxier, error) {
+func (bg *BackendGroup) ProxyWS(ctx context.Context, clientConn *websocket.Conn, methodWhitelist *StringSet, serverReadLimit int64) (*WSProxier, error) {
 	for _, back := range bg.Backends {
-		proxier, err := back.ProxyWS(clientConn, methodWhitelist)
+		proxier, err := back.ProxyWS(clientConn, methodWhitelist, serverReadLimit)
 		if errors.Is(err, ErrBackendOffline) {
 			log.Warn(
 				"skipping offline backend",
@@ -1728,6 +1747,7 @@ func (bg *BackendGroup) OverwriteConsensusResponses(rpcReqs []*RPCReq, overridde
 		safe:          bg.Consensus.GetSafeBlockNumber(),
 		finalized:     bg.Consensus.GetFinalizedBlockNumber(),
 		maxBlockRange: bg.Consensus.maxBlockRange,
+		consensusMode: true,
 	}
 
 	for i, req := range rpcReqs {
@@ -1748,6 +1768,47 @@ func (bg *BackendGroup) OverwriteConsensusResponses(rpcReqs []*RPCReq, overridde
 				)
 			} else {
 				res.Error = ErrParseErr
+			}
+		case RewriteOverrideResponse:
+			overriddenResponses = append(overriddenResponses, &indexedReqRes{
+				index: i,
+				req:   req,
+				res:   &res,
+			})
+		case RewriteOverrideRequest, RewriteNone:
+			rewrittenReqs = append(rewrittenReqs, req)
+		}
+	}
+	return rewrittenReqs, overriddenResponses
+}
+
+func (bg *BackendGroup) OverwriteNonConsensusRequests(rpcReqs []*RPCReq, overriddenResponses []*indexedReqRes) ([]*RPCReq, []*indexedReqRes) {
+	rctx := RewriteContext{
+		latest:        0,
+		safe:          0,
+		finalized:     0,
+		maxBlockRange: bg.maxBlockRange,
+		consensusMode: false,
+	}
+
+	rewrittenReqs := make([]*RPCReq, 0, len(rpcReqs))
+
+	for i, req := range rpcReqs {
+		res := RPCRes{JSONRPC: JSONRPCVersion, ID: req.ID}
+		result, err := RewriteTags(rctx, req, &res)
+		switch result {
+		case RewriteOverrideError:
+			overriddenResponses = append(overriddenResponses, &indexedReqRes{
+				index: i,
+				req:   req,
+				res:   &res,
+			})
+			if errors.Is(err, ErrRewriteRangeTooLarge) {
+				res.Error = ErrInvalidParams(
+					fmt.Sprintf("block range greater than %d max", rctx.maxBlockRange),
+				)
+			} else {
+				res.Error = ErrInvalidParams(err.Error())
 			}
 		case RewriteOverrideResponse:
 			overriddenResponses = append(overriddenResponses, &indexedReqRes{

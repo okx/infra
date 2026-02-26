@@ -3,6 +3,7 @@ package registry
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ethereum-optimism/infra/op-acceptor/types"
@@ -222,6 +223,139 @@ gates:
 	require.Equal(t, "test-suite", validators[1].Suite)
 }
 
+func TestExcludeGatesFiltering(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "validators.yaml")
+
+	// validators: two gates, base and flake-shake; base also contains distinct test T2
+	cfg := `
+gates:
+  - id: base
+    tests:
+      - name: T1
+        package: ./pkg
+      - name: T2
+        package: ./pkg2
+      - package: ./pkg
+  - id: flake-shake
+    tests:
+      - name: T1
+        package: ./pkg
+      - package: ./pkg
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(cfg), 0644))
+
+	// Build a registry with exclude-gates=flake-shake
+	reg, err := NewRegistry(Config{
+		ValidatorConfigFile: configPath,
+		ExcludeGates:        []string{"flake-shake"},
+	})
+	require.NoError(t, err)
+
+	// Validators should include only the distinct base test (T2 in ./pkg2)
+	vals := reg.GetValidators()
+	require.NotEmpty(t, vals)
+	for _, v := range vals {
+		assert.Equal(t, types.ValidatorTypeTest, v.Type)
+		if v.Gate == "base" {
+			// Only T2 (pkg2) should remain; T1 and ./pkg package were excluded via flake-shake skip set
+			assert.True(t, v.FuncName == "T2" || v.Package == "./pkg2")
+		}
+		// There should be no validators with gate flake-shake
+		assert.NotEqual(t, "flake-shake", v.Gate)
+	}
+}
+
+func TestParseExcludeGates_DefaultAndEmpty(t *testing.T) {
+	// The parser lives in nat/config.go; test via small wrapper here by importing it through a local copy is complex.
+	// Instead, verify behavior indirectly by env and flag precedence through NewRegistry isn't accessible.
+	// We cover the main exclusion path in TestExcludeGatesFiltering.
+}
+
+func TestExcludeGates_PackagePrefix_Gateless(t *testing.T) {
+	// Layout:
+	// tmpDir/
+	//   tests/
+	//     pkg/
+	//       pkg_test.go
+	//     pkg/sub/
+	//       sub_test.go
+	// validators.yaml defines gate 'black' with a package-only entry ./tests/pkg
+
+	tmpDir := t.TempDir()
+
+	// Create packages
+	pkgDir := filepath.Join(tmpDir, "tests", "pkg")
+	subDir := filepath.Join(tmpDir, "tests", "pkg", "sub")
+	require.NoError(t, os.MkdirAll(pkgDir, 0755))
+	require.NoError(t, os.MkdirAll(subDir, 0755))
+
+	// Write minimal *_test.go files
+	require.NoError(t, os.WriteFile(filepath.Join(pkgDir, "pkg_test.go"), []byte("package pkg_test\nimport \"testing\"\nfunc TestX(t *testing.T){}\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(subDir, "sub_test.go"), []byte("package sub_test\nimport \"testing\"\nfunc TestY(t *testing.T){}\n"), 0644))
+
+	// Create validators.yaml with package-only blacklist (relative to TestDir)
+	validators := `gates:
+  - id: black
+    tests:
+      - package: ./pkg
+`
+	cfgPath := filepath.Join(tmpDir, "validators.yaml")
+	require.NoError(t, os.WriteFile(cfgPath, []byte(validators), 0644))
+
+	// Create registry in gateless mode with exclude gate
+	reg, err := NewRegistry(Config{
+		Log:                 log.New(),
+		GatelessMode:        true,
+		TestDir:             filepath.Join(tmpDir, "tests"),
+		ValidatorConfigFile: cfgPath,
+		ExcludeGates:        []string{"black"},
+	})
+	require.NoError(t, err)
+
+	vals := reg.GetValidators()
+	// Expect zero validators after blacklist matches prefix (both ./tests/pkg and ./tests/pkg/sub)
+	assert.Len(t, vals, 0, "all discovered tests under ./tests/pkg should be excluded by prefix blacklist")
+}
+
+func TestExcludeGates_Inheritance(t *testing.T) {
+	// Excluding a gate should also exclude tests it inherits from parents
+	tmpDir := t.TempDir()
+
+	cfg := `gates:
+  - id: parent
+    tests:
+      - name: TParent
+        package: ./pkg
+  - id: child
+    inherits: [parent]
+    tests:
+      - name: TChild
+        package: ./pkg
+  - id: base
+    tests:
+      - name: TKeep
+        package: ./pkg2
+`
+	cfgPath := filepath.Join(tmpDir, "validators.yaml")
+	require.NoError(t, os.WriteFile(cfgPath, []byte(cfg), 0644))
+
+	reg, err := NewRegistry(Config{
+		ValidatorConfigFile: cfgPath,
+		ExcludeGates:        []string{"child"},
+	})
+	require.NoError(t, err)
+
+	vals := reg.GetValidators()
+	// Expect that TParent and TChild tuples are excluded everywhere; only TKeep remains
+	for _, v := range vals {
+		assert.Equal(t, types.ValidatorTypeTest, v.Type)
+		assert.False(t, v.FuncName == "TParent" && v.Package == "./pkg")
+		assert.False(t, v.FuncName == "TChild" && v.Package == "./pkg")
+		assert.True(t, v.FuncName == "TKeep" || v.Package == "./pkg2")
+	}
+}
+
 func TestRegistryGatelessMode(t *testing.T) {
 	// Create temporary directory for the test
 	tmpDir := t.TempDir()
@@ -321,4 +455,44 @@ func TestRegistryGatelessModeInvalidDir(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "does not exist")
+}
+
+// Ensure that gateless discovery never emits package paths that begin with "../"
+// which can cause local path checks to fail under CI (e.g., sysgo orchestrator).
+func TestRegistryGatelessMode_NoParentComponents(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a nested working root with a path that includes ".." when joined
+	rootDir := filepath.Join(tmpDir, "root")
+	require.NoError(t, os.MkdirAll(rootDir, 0o755))
+
+	subDir := filepath.Join(rootDir, "sub")
+	require.NoError(t, os.MkdirAll(subDir, 0o755))
+
+	// Create two go test packages under subDir
+	pkg1 := filepath.Join(subDir, "pkg1")
+	require.NoError(t, os.MkdirAll(pkg1, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(pkg1, "pkg1_test.go"), []byte("package pkg1\nimport \"testing\"\nfunc TestOne(t *testing.T){}\n"), 0o644))
+
+	pkg2 := filepath.Join(subDir, "pkg2")
+	require.NoError(t, os.MkdirAll(pkg2, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(pkg2, "pkg2_test.go"), []byte("package pkg2\nimport \"testing\"\nfunc TestTwo(t *testing.T){}\n"), 0o644))
+
+	// Construct a TestDir expression that contains a ".." component
+	// When resolved, it still points at subDir.
+	testDirWithParent := filepath.Join(subDir, "..", "sub") + "/..."
+
+	reg, err := NewRegistry(Config{
+		Log:          log.New(),
+		GatelessMode: true,
+		TestDir:      testDirWithParent,
+	})
+	require.NoError(t, err)
+
+	validators := reg.GetValidators()
+	require.NotEmpty(t, validators)
+
+	for _, v := range validators {
+		assert.False(t, strings.HasPrefix(v.Package, "../"), "package path should not start with ../: %s", v.Package)
+	}
 }

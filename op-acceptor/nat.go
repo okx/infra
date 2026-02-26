@@ -1,7 +1,9 @@
 package nat
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +16,8 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/jedib0t/go-pretty/v6/table"
+	"github.com/jedib0t/go-pretty/v6/text"
 	"github.com/urfave/cli/v2"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
@@ -56,6 +60,46 @@ type nat struct {
 	shutdownCallback func(error) // Callback to signal application shutdown
 }
 
+// buildEffectiveSnapshot builds a snapshot of the effective configuration for logging and artifacts
+func (n *nat) buildEffectiveSnapshot(runID string) types.EffectiveConfigSnapshot {
+	workDir := strings.TrimSuffix(n.config.TestDir, "/...")
+
+	return types.EffectiveConfigSnapshot{
+		Runner: types.RunnerConfigSnapshot{
+			AllowSkips:       n.config.AllowSkips,
+			DefaultTimeout:   n.config.DefaultTimeout,
+			Timeout:          n.config.Timeout,
+			Serial:           n.config.Serial,
+			Concurrency:      n.config.Concurrency,
+			ShowProgress:     n.config.ShowProgress,
+			ProgressInterval: n.config.ProgressInterval,
+		},
+		Orchestration: types.OrchestrationConfigSnapshot{
+			Orchestrator: n.config.Orchestrator.String(),
+			DevnetEnvURL: n.config.DevnetEnvURL,
+		},
+		Logging: types.LoggingConfigSnapshot{
+			TestLogLevel:       n.config.TestLogLevel,
+			OutputRealtimeLogs: n.config.OutputRealtimeLogs,
+		},
+		Execution: types.ExecutionConfigSnapshot{
+			RunInterval: n.config.RunInterval,
+			RunOnce:     n.config.RunOnce,
+			GoBinary:    n.config.GoBinary,
+			TargetGate:  n.config.TargetGate,
+			Gateless:    n.config.GatelessMode,
+		},
+		Paths: types.PathsConfigSnapshot{
+			TestDir:         n.config.TestDir,
+			ValidatorConfig: n.config.ValidatorConfig,
+			LogDir:          n.config.LogDir,
+			WorkDir:         workDir,
+		},
+		NetworkName: n.networkName,
+		RunID:       runID,
+	}
+}
+
 func New(ctx context.Context, config *Config, version string, shutdownCallback func(error)) (*nat, error) {
 	if config == nil {
 		return nil, errors.New("config is required")
@@ -68,6 +112,7 @@ func New(ctx context.Context, config *Config, version string, shutdownCallback f
 		Timeout:             config.Timeout,
 		GatelessMode:        config.GatelessMode,
 		TestDir:             config.TestDir,
+		ExcludeGates:        config.ExcludeGates,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create registry: %w", err)
@@ -102,10 +147,10 @@ func New(ctx context.Context, config *Config, version string, shutdownCallback f
 
 	default:
 		// This should never happen due to CLI validation, but provide a clear error message
-		return nil, fmt.Errorf("invalid orchestrator: %s.", config.Orchestrator)
+		return nil, fmt.Errorf("invalid orchestrator: %s", config.Orchestrator)
 	}
 
-	config.Log.Info("Using network name for metrics", "network", networkName)
+	config.Log.Debug("Using network name for metrics", "network", networkName)
 
 	// Create runner with registry
 	targetGate := config.TargetGate
@@ -114,19 +159,7 @@ func New(ctx context.Context, config *Config, version string, shutdownCallback f
 	}
 
 	// Set working directory for the runner
-	workDir := config.TestDir
-	if config.GatelessMode {
-		// For gateless mode, use the current working directory since package paths
-		// are discovered relative to it and should not be adjusted
-		var err error
-		workDir, err = os.Getwd()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get current working directory: %w", err)
-		}
-	} else if strings.HasSuffix(workDir, "/...") {
-		// For traditional mode with "..." notation, clean the suffix
-		workDir = strings.TrimSuffix(workDir, "/...")
-	}
+	workDir := strings.TrimSuffix(config.TestDir, "/...")
 
 	testRunner, err := runner.NewTestRunner(runner.Config{
 		Registry:           reg,
@@ -141,6 +174,8 @@ func New(ctx context.Context, config *Config, version string, shutdownCallback f
 		DevnetEnv:          devnetEnv,
 		Serial:             config.Serial,
 		Concurrency:        config.Concurrency,
+		ShowProgress:       config.ShowProgress,
+		ProgressInterval:   config.ProgressInterval,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create test runner: %w", err)
@@ -173,24 +208,26 @@ func New(ctx context.Context, config *Config, version string, shutdownCallback f
 		tracer:           otel.Tracer("op-acceptor"),
 	}
 
-	// Create addons manager
-	addonsOpts := []addons.Option{}
-	if devnetEnv != nil {
-		features := devnetEnv.Env.Features
-		if !slices.Contains(features, "faucet") {
-			addonsOpts = append(addonsOpts, addons.WithFaucet())
+	// Create addons manager (skip in dry-run)
+	if true {
+		addonsOpts := []addons.Option{}
+		if devnetEnv != nil {
+			features := devnetEnv.Env.Features
+			if !slices.Contains(features, "faucet") {
+				addonsOpts = append(addonsOpts, addons.WithFaucet())
+			}
+		} else {
+			// For sysgo orchestrator, we don't have devnet environment features
+			// so we'll use default addons behavior (which may include faucet if needed)
+			config.Log.Debug("No devnet environment available (sysgo orchestrator), using default addons configuration")
 		}
-	} else {
-		// For sysgo orchestrator, we don't have devnet environment features
-		// so we'll use default addons behavior (which may include faucet if needed)
-		config.Log.Debug("No devnet environment available (sysgo orchestrator), using default addons configuration")
-	}
 
-	addonsManager, err := addons.NewAddonsManager(ctx, devnetEnv, addonsOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create addons manager: %w", err)
+		addonsManager, err := addons.NewAddonsManager(ctx, devnetEnv, addonsOpts...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create addons manager: %w", err)
+		}
+		res.addonsManager = addonsManager
 	}
-	res.addonsManager = addonsManager
 	return res, nil
 }
 
@@ -226,8 +263,10 @@ func (n *nat) Start(ctx context.Context) error {
 	ctx, span := n.tracer.Start(ctx, "acceptance tests")
 	defer span.End()
 
-	if err := n.addonsManager.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start addons: %w", err)
+	if n.addonsManager != nil {
+		if err := n.addonsManager.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start addons: %w", err)
+		}
 	}
 
 	n.ctx = ctx
@@ -240,6 +279,34 @@ func (n *nat) Start(ctx context.Context) error {
 		n.config.Log.Info("Starting op-acceptor in continuous mode", "interval", n.config.RunInterval)
 	}
 
+	// Log Effective Configuration summary (INFO)
+	{
+		snap := n.buildEffectiveSnapshot("")
+		n.config.Log.Info("Effective Configuration",
+			"orchestrator", snap.Orchestration.Orchestrator,
+			"devnet_env_url", snap.Orchestration.DevnetEnvURL,
+			"testdir", snap.Paths.TestDir,
+			"validator_config", snap.Paths.ValidatorConfig,
+			"logdir", snap.Paths.LogDir,
+			"workdir", snap.Paths.WorkDir,
+			"go_binary", snap.Execution.GoBinary,
+			"target_gate", snap.Execution.TargetGate,
+			"gateless", snap.Execution.Gateless,
+			"run_interval", snap.Execution.RunInterval,
+			"run_once", snap.Execution.RunOnce,
+			"allow_skips", snap.Runner.AllowSkips,
+			"default_timeout", snap.Runner.DefaultTimeout,
+			"timeout", snap.Runner.Timeout,
+			"serial", snap.Runner.Serial,
+			"concurrency", snap.Runner.Concurrency,
+			"show_progress", snap.Runner.ShowProgress,
+			"progress_interval", snap.Runner.ProgressInterval,
+			"test_log_level", snap.Logging.TestLogLevel,
+			"output_realtime_logs", snap.Logging.OutputRealtimeLogs,
+			"network", snap.NetworkName,
+		)
+	}
+
 	n.config.Log.Debug("NAT config paths",
 		"config.TestDir", n.config.TestDir,
 		"config.ValidatorConfig", n.config.ValidatorConfig,
@@ -248,6 +315,12 @@ func (n *nat) Start(ctx context.Context) error {
 	// Run tests immediately on startup
 	err := n.runTests(ctx)
 	if err != nil {
+		// Check the error type and return appropriate error for exit code handling
+		// Also check the error message as a fallback in case type information is lost
+		if IsTestFailureError(err) || strings.HasPrefix(err.Error(), "test failure:") {
+			// Test failures should use exit code 1
+			return cli.Exit(err.Error(), 1)
+		}
 		// For runtime errors (like panics or configuration issues), return exit code 2
 		n.config.Log.Error("Runtime error running tests", "error", err)
 		return cli.Exit(err.Error(), 2)
@@ -313,7 +386,7 @@ func (n *nat) runTests(ctx context.Context) error {
 
 	// Generate a runID for this test run
 	runID := uuid.New().String()
-	n.config.Log.Info("Generated new runID for test run", "runID", runID)
+	n.config.Log.Debug("Generated new runID for test run", "runID", runID)
 
 	// Create a new file logger with the runID
 	fileLogger, err := logging.NewFileLogger(n.config.LogDir, runID, n.networkName, n.config.TargetGate)
@@ -325,6 +398,14 @@ func (n *nat) runTests(ctx context.Context) error {
 	// Save the new logger
 	n.fileLogger = fileLogger
 
+	// Provide effective configuration snapshot to HTML sink for this run
+	if sink, ok := n.fileLogger.GetSinkByType("ReportingHTMLSink"); ok {
+		if htmlSink, ok := sink.(*reporting.ReportingHTMLSink); ok {
+			snap := n.buildEffectiveSnapshot(runID)
+			htmlSink.SetConfigSnapshot(runID, &snap)
+		}
+	}
+
 	// Update the runner with the new file logger
 	if n.runner != nil {
 		if fileLoggerRunner, ok := n.runner.(runner.TestRunnerWithFileLogger); ok {
@@ -334,39 +415,122 @@ func (n *nat) runTests(ctx context.Context) error {
 		}
 	}
 
-	// Run the tests with our new logger
-	result, err := n.runner.RunAllTests(ctx)
-	if err != nil {
-		// This is a runtime error (not a test failure)
-		n.config.Log.Error("Runtime error running tests", "error", err)
-		return NewRuntimeError(err)
-	}
-	n.result = result
+	// Run the tests - either flake-shake mode or regular mode
+	// Optional flake-shake report artifact paths for final consolidated log
+	var flakeReportHTML string
+	var flakeReportJSON string
 
-	// We should have the same runID from the test run result
-	if result.RunID != runID {
+	if n.config.FlakeShake {
+		// Run in flake-shake mode
+		n.config.Log.Info("Running in flake-shake mode", "iterations", n.config.FlakeShakeIterations)
+
+		flakeShakeRunner := runner.NewFlakeShakeRunner(n.runner, n.config.FlakeShakeIterations, n.config.Log)
+		// Ensure gate is set to "gateless" when running in gateless mode
+		gateForReport := n.config.TargetGate
+		if n.config.GatelessMode || gateForReport == "" {
+			gateForReport = "gateless"
+		}
+		flakeShakeReport, err := flakeShakeRunner.RunFlakeShake(ctx, gateForReport)
+		if err != nil {
+			n.config.Log.Error("Flake-shake analysis failed", "error", err)
+			return NewRuntimeError(err)
+		}
+
+		// Save flake-shake reports (both JSON and HTML) in this run's directory
+		// Set the RunID on the report for traceability
+		flakeShakeReport.RunID = runID
+		runDir, getDirErr := n.fileLogger.GetDirectoryForRunID(runID)
+		if getDirErr != nil || runDir == "" {
+			// Fallback to default layout if for some reason run dir isn't available
+			runDir = filepath.Join(n.config.LogDir, "testrun-"+runID)
+			_ = os.MkdirAll(runDir, 0755)
+		}
+		savedFiles, err := runner.SaveFlakeShakeReport(flakeShakeReport, runDir)
+		if err != nil {
+			n.config.Log.Error("Failed to save flake-shake reports", "error", err)
+		}
+		// Capture flake report filepaths
+		for _, file := range savedFiles {
+			if strings.HasSuffix(file, ".html") {
+				flakeReportHTML = file
+			} else if strings.HasSuffix(file, ".json") {
+				flakeReportJSON = file
+			}
+		}
+
+		// Create a summary result for display purposes
+		n.result = &runner.RunnerResult{
+			RunID:         runID,
+			Status:        types.TestStatusPass,
+			WallClockTime: time.Since(time.Now()),
+			Stats: runner.ResultStats{
+				Total: len(flakeShakeReport.Tests),
+			},
+		}
+
+		// Print flake-shake summary
+		n.printFlakeShakeSummary(flakeShakeReport)
+
+	} else {
+		// Regular test execution
+		result, err := n.runner.RunAllTests(ctx)
+		if err != nil {
+			// Check if this is a test-related error (e.g., module resolution) vs a runtime error
+			if strings.Contains(err.Error(), "is not in module") {
+				// Module resolution errors should be treated as test failures, not runtime errors
+				n.config.Log.Error("Test execution failed", "error", err)
+				return NewTestFailureError(err.Error())
+			}
+			// This is a runtime error (not a test failure)
+			n.config.Log.Error("Runtime error running tests", "error", err)
+			return NewRuntimeError(err)
+		}
+		n.result = result
+
+		// If blacklist removed all selected tests, report and exit successfully
+		if n.result != nil && n.result.Stats.Total == 0 {
+			n.config.Log.Info("No tests to run after applying blacklist")
+			// Complete the file logging to close writers
+			if n.fileLogger != nil {
+				_ = n.fileLogger.CompleteWithTiming(n.result.RunID, n.result.WallClockTime)
+			}
+			return nil
+		}
+	}
+
+	// We should have the same runID from the test run result (skip for flake-shake mode)
+	if !n.config.FlakeShake && n.result.RunID != runID {
 		n.config.Log.Warn("RunID from result doesn't match expected runID",
-			"expected", runID, "actual", result.RunID)
+			"expected", runID, "actual", n.result.RunID)
 	}
 
-	reproBlurb := "\nTo reproduce this run, set the following environment variables:\n" + n.runner.ReproducibleEnv().String()
+	// Skip regular result printing for flake-shake mode
+	if !n.config.FlakeShake {
+		reproBlurb := "\nTo reproduce this run, set the following environment variables:\n" + n.runner.ReproducibleEnv().String()
 
-	n.config.Log.Info("Printing results table")
-	n.printResultsTable(result.RunID)
-	for _, line := range strings.Split(reproBlurb, "\n") {
-		n.config.Log.Info(line)
+		n.config.Log.Debug("Printing results table")
+		n.printResultsTable(n.result.RunID)
+		for _, line := range strings.Split(reproBlurb, "\n") {
+			n.config.Log.Info(line)
+		}
 	}
 
 	// Complete the file logging
-	if err := n.fileLogger.CompleteWithTiming(result.RunID, n.result.WallClockTime); err != nil {
+	if err := n.fileLogger.CompleteWithTiming(n.result.RunID, n.result.WallClockTime); err != nil {
 		n.config.Log.Error("Error completing file logging", "error", err)
 	}
 
 	// Save the original detailed summary to the all.log file
-	resultSummary := n.result.String() + reproBlurb
+	var resultSummary string
+	if n.config.FlakeShake {
+		resultSummary = "Flake-Shake Analysis Complete\n"
+	} else {
+		reproBlurb := "\nTo reproduce this run, set the following environment variables:\n" + n.runner.ReproducibleEnv().String()
+		resultSummary = n.result.String() + reproBlurb
+	}
 
 	// Get the all.log file path
-	allLogsFile, err := n.fileLogger.GetAllLogsFileForRunID(result.RunID)
+	allLogsFile, err := n.fileLogger.GetAllLogsFileForRunID(n.result.RunID)
 	if err != nil {
 		n.config.Log.Error("Error getting all.log file path", "error", err)
 	} else {
@@ -378,29 +542,34 @@ func (n *nat) runTests(ctx context.Context) error {
 	}
 
 	// Get the raw_go_events.log file path
-	rawEventsFile, err := n.fileLogger.GetRawEventsFileForRunID(result.RunID)
+	rawEventsFile, err := n.fileLogger.GetRawEventsFileForRunID(n.result.RunID)
 	if err != nil {
 		n.config.Log.Error("Error getting raw_go_events.log file path", "error", err)
 	} else {
 		n.config.Log.Info("Raw Go test events saved", "file", rawEventsFile)
 	}
 
-	if n.result.Status == types.TestStatusFail && result.Stats.Failed > result.Stats.Passed {
+	if n.result.Status == types.TestStatusFail && n.result.Stats.Failed > n.result.Stats.Passed {
 		printGandalf()
 	}
 
 	// Get log directory for this run
-	logDir, err := n.fileLogger.GetDirectoryForRunID(result.RunID)
+	logDir, err := n.fileLogger.GetDirectoryForRunID(n.result.RunID)
 	if err != nil {
 		n.config.Log.Error("Error getting log directory path", "error", err)
 		// Use default base directory as fallback
 		logDir = n.fileLogger.GetBaseDir()
 	}
 
+	// Write artifacts for this run
+	if err := n.writeRunArtifacts(n.result.RunID); err != nil {
+		n.config.Log.Error("Error writing run artifacts", "error", err)
+	}
+
 	// Record metrics for the test run
 	metrics.RecordAcceptance(
 		n.networkName,
-		result.RunID,
+		n.result.RunID,
 		string(n.result.Status),
 		n.result.Stats.Total,
 		n.result.Stats.Passed,
@@ -408,13 +577,28 @@ func (n *nat) runTests(ctx context.Context) error {
 		n.result.Duration,
 	)
 
-	// Record metrics for individual tests
+	// Record metrics for individual tests and aggregated gate/suite metrics
 	for _, gate := range n.result.Gates {
+		// Calculate gate-level aggregates
+		gateTotal := 0
+		gatePassed := 0
+		gateFailed := 0
+		var gateDuration time.Duration
+
 		// Record direct gate tests
 		for testName, test := range gate.Tests {
+			gateTotal++
+			gateDuration += test.Duration
+
+			if test.Status == types.TestStatusPass {
+				gatePassed++
+			} else if test.Status == types.TestStatusFail {
+				gateFailed++
+			}
+
 			metrics.RecordIndividualTest(
 				n.networkName,
-				result.RunID,
+				n.result.RunID,
 				testName,
 				gate.ID,
 				"", // No suite for direct gate tests
@@ -422,26 +606,59 @@ func (n *nat) runTests(ctx context.Context) error {
 				test.Duration,
 			)
 
+			// Record duration histogram
+			metrics.RecordTestDurationHistogram(n.networkName, testName, gate.ID, "", test.Duration)
+
+			// Check for timeout in error message
+			if test.Error != nil && strings.Contains(test.Error.Error(), "timeout") {
+				metrics.RecordTestTimeout(n.networkName, n.result.RunID, testName, gate.ID, "")
+			}
+
 			// Record subtests if present
 			for subTestName, subTest := range test.SubTests {
 				metrics.RecordIndividualTest(
 					n.networkName,
-					result.RunID,
+					n.result.RunID,
 					subTestName,
 					gate.ID,
 					"", // No suite for direct gate tests
 					subTest.Status,
 					subTest.Duration,
 				)
+
+				// Record subtest duration histogram
+				metrics.RecordTestDurationHistogram(n.networkName, subTestName, gate.ID, "", subTest.Duration)
+
+				// Check for timeout in subtest
+				if subTest.Error != nil && strings.Contains(subTest.Error.Error(), "timeout") {
+					metrics.RecordTestTimeout(n.networkName, n.result.RunID, subTestName, gate.ID, "")
+				}
 			}
 		}
 
 		// Record suite tests
 		for suiteName, suite := range gate.Suites {
+			// Calculate suite-level aggregates
+			suiteTotal := 0
+			suitePassed := 0
+			suiteFailed := 0
+
 			for testName, test := range suite.Tests {
+				gateTotal++
+				suiteTotal++
+				gateDuration += test.Duration
+
+				if test.Status == types.TestStatusPass {
+					gatePassed++
+					suitePassed++
+				} else if test.Status == types.TestStatusFail {
+					gateFailed++
+					suiteFailed++
+				}
+
 				metrics.RecordIndividualTest(
 					n.networkName,
-					result.RunID,
+					n.result.RunID,
 					testName,
 					gate.ID,
 					suiteName,
@@ -449,28 +666,93 @@ func (n *nat) runTests(ctx context.Context) error {
 					test.Duration,
 				)
 
+				// Record duration histogram
+				metrics.RecordTestDurationHistogram(n.networkName, testName, gate.ID, suiteName, test.Duration)
+
+				// Check for timeout
+				if test.Error != nil && strings.Contains(test.Error.Error(), "timeout") {
+					metrics.RecordTestTimeout(n.networkName, n.result.RunID, testName, gate.ID, suiteName)
+				}
+
 				// Record subtests if present
 				for subTestName, subTest := range test.SubTests {
 					metrics.RecordIndividualTest(
 						n.networkName,
-						result.RunID,
+						n.result.RunID,
 						subTestName,
 						gate.ID,
 						suiteName,
 						subTest.Status,
 						subTest.Duration,
 					)
+
+					// Record subtest duration histogram
+					metrics.RecordTestDurationHistogram(n.networkName, subTestName, gate.ID, suiteName, subTest.Duration)
+
+					// Check for timeout in subtest
+					if subTest.Error != nil && strings.Contains(subTest.Error.Error(), "timeout") {
+						metrics.RecordTestTimeout(n.networkName, n.result.RunID, subTestName, gate.ID, suiteName)
+					}
 				}
 			}
+
+			// Record suite-level metrics
+			if suiteTotal > 0 {
+				metrics.RecordSuiteMetrics(n.networkName, gate.ID, suiteName, suiteTotal, suitePassed, suiteFailed)
+			}
+		}
+
+		// Record gate-level metrics
+		if gateTotal > 0 {
+			metrics.RecordGateMetrics(n.networkName, n.result.RunID, gate.ID, gateTotal, gatePassed, gateFailed, gateDuration)
 		}
 	}
 
-	n.config.Log.Info("Test run completed",
-		"run_id", result.RunID,
+	// Build consolidated fields for final log line
+	fields := []interface{}{
+		"run_id", n.result.RunID,
 		"status", n.result.Status,
 		"log_dir", logDir,
 		"results_html", filepath.Join(logDir, logging.HTMLResultsFilename),
-	)
+	}
+	// Include flake-shake report paths if available (flake-shake mode)
+	if n.config.FlakeShake {
+		if flakeReportHTML != "" {
+			fields = append(fields, "flake_report_html", flakeReportHTML)
+		}
+		if flakeReportJSON != "" {
+			fields = append(fields, "flake_report_json", flakeReportJSON)
+		}
+	}
+
+	n.config.Log.Info("Test run completed", fields...)
+	return nil
+}
+
+// writeRunArtifacts writes basic artifacts describing the run configuration and reproduction env
+func (n *nat) writeRunArtifacts(runID string) error {
+	if n.fileLogger == nil {
+		return nil
+	}
+	dir, err := n.fileLogger.GetDirectoryForRunID(runID)
+	if err != nil {
+		return err
+	}
+	// reproducible-env.txt
+	envPath := filepath.Join(dir, "reproducible-env.txt")
+	repro := n.runner.ReproducibleEnv().String()
+	if err := os.WriteFile(envPath, []byte(repro+"\n"), 0644); err != nil {
+		return fmt.Errorf("failed to write reproducible-env.txt: %w", err)
+	}
+	// config.json (effective snapshot)
+	snap := n.buildEffectiveSnapshot(runID)
+	b, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal config.json: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), b, 0644); err != nil {
+		return fmt.Errorf("failed to write config.json: %w", err)
+	}
 	return nil
 }
 
@@ -492,9 +774,11 @@ func (n *nat) Stop(ctx context.Context) error {
 	n.config.Log.Debug("Sending done signal to goroutines")
 	close(n.done)
 
-	n.config.Log.Debug("Stopping addons")
-	if err := n.addonsManager.Stop(ctx); err != nil {
-		return fmt.Errorf("failed to stop addons: %w", err)
+	if n.addonsManager != nil {
+		n.config.Log.Debug("Stopping addons")
+		if err := n.addonsManager.Stop(ctx); err != nil {
+			return fmt.Errorf("failed to stop addons: %w", err)
+		}
 	}
 
 	n.config.Log.Info("op-acceptor stopped successfully")
@@ -508,7 +792,112 @@ func (n *nat) Stopped() bool {
 	return !n.running.Load()
 }
 
-// printResultsTable prints the results of the acceptance tests to the console.
+// printFlakeShakeSummary prints the flake-shake analysis results to the console.
+func (n *nat) printFlakeShakeSummary(report *runner.FlakeShakeReport) {
+	n.config.Log.Info("Printing flake-shake results...")
+
+	// Print the formatted table
+	tableStr := n.formatFlakeShakeTable(report)
+	fmt.Print(tableStr)
+}
+
+// formatFlakeShakeTable formats the flake-shake report as a table
+func (n *nat) formatFlakeShakeTable(report *runner.FlakeShakeReport) string {
+	var buf bytes.Buffer
+
+	// Create table writer
+	t := table.NewWriter()
+	t.SetOutputMirror(&buf)
+	t.SetTitle(fmt.Sprintf("Flake-Shake Analysis Results (gate: %s, iterations: %d)", report.Gate, report.Iterations))
+
+	// Set headers
+	t.AppendHeader(table.Row{"TEST NAME", "PACKAGE", "RUNS", "PASS RATE", "AVG DURATION", "RECOMMENDATION", "STATUS"})
+
+	// Configure columns
+	t.SetColumnConfigs([]table.ColumnConfig{
+		{Name: "TEST NAME"},
+		{Name: "PACKAGE"},
+		{Name: "RUNS", Align: text.AlignRight},
+		{Name: "PASS RATE", Align: text.AlignRight},
+		{Name: "AVG DURATION", Align: text.AlignRight},
+		{Name: "RECOMMENDATION", Align: text.AlignCenter},
+		{Name: "STATUS", Align: text.AlignCenter},
+	})
+
+	// Count statistics
+	stable := 0
+	unstable := 0
+
+	// Add test rows
+	for _, test := range report.Tests {
+		status := "✓"
+		if test.PassRate < 100 {
+			status = "✗"
+		}
+
+		// Format test name - extract actual test name from package if empty
+		testName := test.TestName
+		packageName := test.Package
+		if testName == "" && packageName != "" {
+			// Try to extract test name from package string
+			parts := strings.Split(packageName, "::")
+			if len(parts) > 1 {
+				packageName = parts[0]
+				// Take last part after last /
+				pkgParts := strings.Split(parts[len(parts)-1], "/")
+				testName = pkgParts[len(pkgParts)-1]
+			} else {
+				// Extract last part of package path as test name
+				pkgParts := strings.Split(packageName, "/")
+				testName = pkgParts[len(pkgParts)-1]
+			}
+		}
+
+		// Determine color for status
+		var statusColor text.Color
+		if test.Recommendation == "STABLE" {
+			statusColor = text.FgGreen
+			stable++
+		} else {
+			statusColor = text.FgRed
+			unstable++
+		}
+
+		t.AppendRow(table.Row{
+			testName,
+			packageName,
+			fmt.Sprintf("%d/%d", test.Passes, test.TotalRuns),
+			fmt.Sprintf("%.1f%%", test.PassRate),
+			test.AvgDuration.Round(time.Millisecond).String(),
+			statusColor.Sprint(test.Recommendation),
+			status,
+		})
+	}
+
+	// Add summary footer
+	t.AppendFooter(table.Row{
+		"TOTAL",
+		fmt.Sprintf("%d tests", len(report.Tests)),
+		"",
+		"",
+		"",
+		fmt.Sprintf("Stable: %d | Unstable: %d", stable, unstable),
+		"",
+	})
+
+	// Set style based on overall results
+	if unstable > 0 {
+		t.SetStyle(table.StyleColoredBlackOnRedWhite)
+	} else if stable == len(report.Tests) && len(report.Tests) > 0 {
+		t.SetStyle(table.StyleColoredBlackOnGreenWhite)
+	} else {
+		t.SetStyle(table.StyleDefault)
+	}
+
+	t.Render()
+	return buf.String()
+}
+
 func (n *nat) printResultsTable(runID string) {
 	n.config.Log.Info("Printing results...")
 
