@@ -1001,9 +1001,7 @@ func TestConsensus(t *testing.T) {
 }
 
 func buildResponse(result interface{}) string {
-	res, err := json.Marshal(proxyd.RPCRes{
-		Result: result,
-	})
+	res, err := json.Marshal(proxyd.NewRPCRes(nil, result))
 	if err != nil {
 		panic(err)
 	}

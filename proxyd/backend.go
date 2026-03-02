@@ -900,10 +900,10 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 	for _, res := range rpcRes {
 		translatedReq, exist := translatedReqs[string(res.ID)]
 		if exist {
-			res.Result = ConsensusGetReceiptsResult{
+			res.Result = mustMarshalJSON(ConsensusGetReceiptsResult{
 				Method: translatedReq.Method,
 				Result: res.Result,
-			}
+			})
 		}
 	}
 
