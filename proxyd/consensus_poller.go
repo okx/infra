@@ -2,6 +2,7 @@ package proxyd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -715,8 +716,8 @@ func (cp *ConsensusPoller) fetchBlock(ctx context.Context, be *Backend, block st
 		return 0, "", err
 	}
 
-	jsonMap, ok := rpcRes.Result.(map[string]interface{})
-	if !ok {
+	var jsonMap map[string]interface{}
+	if err := json.Unmarshal(rpcRes.Result, &jsonMap); err != nil {
 		return 0, "", fmt.Errorf("unexpected response to eth_getBlockByNumber on backend %s", be.Name)
 	}
 
@@ -745,12 +746,12 @@ func (cp *ConsensusPoller) getPeerCount(ctx context.Context, be *Backend) (count
 		return 0, err
 	}
 
-	jsonMap, ok := rpcRes.Result.(string)
-	if !ok {
+	var peerCountHex string
+	if err := json.Unmarshal(rpcRes.Result, &peerCountHex); err != nil {
 		return 0, fmt.Errorf("unexpected response to net_peerCount on backend %s", be.Name)
 	}
 
-	count = hexutil.MustDecodeUint64(jsonMap)
+	count = hexutil.MustDecodeUint64(peerCountHex)
 
 	return count, nil
 }
@@ -763,23 +764,22 @@ func (cp *ConsensusPoller) isInSync(ctx context.Context, be *Backend) (result bo
 		return false, err
 	}
 
-	var res bool
-	switch typed := rpcRes.Result.(type) {
-	case bool:
-		syncing := typed
-		res = !syncing
-	case string:
-		syncing, err := strconv.ParseBool(typed)
+	var syncing bool
+	if err := json.Unmarshal(rpcRes.Result, &syncing); err == nil {
+		return !syncing, nil
+	}
+
+	var syncingStr string
+	if err := json.Unmarshal(rpcRes.Result, &syncingStr); err == nil {
+		syncing, err := strconv.ParseBool(syncingStr)
 		if err != nil {
 			return false, err
 		}
-		res = !syncing
-	default:
-		// result is a json when not in sync
-		res = false
+		return !syncing, nil
 	}
 
-	return res, nil
+	// Result can be an object when syncing is in progress.
+	return false, nil
 }
 
 // GetBackendState creates a copy of backend state so that the caller can use it without locking
