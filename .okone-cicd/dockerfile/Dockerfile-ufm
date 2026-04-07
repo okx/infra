@@ -4,7 +4,7 @@ WORKDIR /root
 
 COPY ./op-ufm /root
 
-RUN make ufm
+RUN CGO_ENABLED=0 make ufm
 
 FROM online-registry.cn-hongkong.cr.aliyuncs.com/okbase/alpine:3.18.3-okg1
 
