@@ -1,21 +1,23 @@
-FROM online-registry.cn-hongkong.cr.aliyuncs.com/okbase/golang:1.24.4-just-foundry as builder
+FROM online-registry.cn-hongkong.cr.aliyuncs.com/okbase/golang:1.24.4-just-foundry AS builder
 
-ARG GITCOMMIT=docker
-ARG GITDATE=docker
-ARG GITVERSION=docker
+WORKDIR /root
 
-RUN apk add --no-cache make jq git gcc musl-dev linux-headers ca-certificates curl bind-tools
-
-COPY ./op-ufm /app
-
-WORKDIR /app
+COPY ./op-ufm /root
 
 RUN make ufm
 
-RUN chmod +x /app/entrypoint.sh
+FROM online-registry.cn-hongkong.cr.aliyuncs.com/okbase/alpine:3.18.3-okg1
+
+RUN apk add --no-cache jq curl bash ca-certificates bind-tools
+
+COPY --from=builder /root/bin/ufm /usr/local/bin/ufm
+COPY --from=builder /root/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+WORKDIR /app
 
 EXPOSE 8080
 EXPOSE 7002
 
-ENTRYPOINT ["/app/entrypoint.sh"]
-CMD ["/app/bin/ufm", "/app/config.toml"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["ufm", "/app/config.toml"]
